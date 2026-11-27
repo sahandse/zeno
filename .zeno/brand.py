@@ -10,7 +10,7 @@ def convert(text):
             .replace('io_github_diercohen_foxhole', 'io_github_sahandse_zeno').replace('FOXHOLE', 'ZENO').replace('Foxhole', 'Zeno').replace('foxhole', 'zeno'))
 
 for p in list(root.rglob('*')):
-    if not p.is_file() or any(x in {'.git', '.zeno', 'node_modules'} for x in p.relative_to(root).parts) or p.name in {'LICENSE', 'bootstrap.yml'}:
+    if not p.is_file() or any(x in {'.git', '.zeno', '.github', 'node_modules'} for x in p.relative_to(root).parts) or p.name in {'LICENSE', 'bootstrap.yml'}:
         continue
     try:
         old = p.read_text(encoding='utf-8')
@@ -21,7 +21,7 @@ for p in list(root.rglob('*')):
         p.write_text(new, encoding='utf-8')
 # Rename native classes, Xcode project entries, package paths and resources together.
 for p in sorted(root.rglob('*'), key=lambda p: len(p.parts), reverse=True):
-    if any(x in {'.git', '.zeno', 'node_modules'} for x in p.relative_to(root).parts):
+    if any(x in {'.git', '.zeno', '.github', 'node_modules'} for x in p.relative_to(root).parts):
         continue
     name = convert(p.name)
     if name != p.name:
@@ -68,6 +68,9 @@ s = s.replace('export function checkUpdate(ways?: Way[]): Promise<void> {',
   if (!process.env.ZENO_REGISTRY) return Promise.resolve();''')
 s = s.replace('npm install -g zeno-vpn@latest', 'npm install -g @sahandse/zeno-vpn@latest')
 p.write_text(s)
+# The fake registry must exercise the same scoped package path as the real updater.
+p = root / 'test/ways.test.mjs'
+p.write_text(p.read_text().replace('pathname === "/zeno-vpn/latest"', 'pathname === "/@sahandse%2fzeno-vpn/latest"'))
 # Signing must be ZENO's. Tag builds must never silently ship a debug-signed APK.
 p = root / 'mobile/android/app/build.gradle'
 s = p.read_text().replace('android {', '''if (gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") } && !keystore) {
