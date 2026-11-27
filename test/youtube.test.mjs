@@ -180,12 +180,14 @@ const both = path.join(dir, "both.pem");
 writeFileSync(both, `${ytCert}${readFileSync(caFiles().cert, "utf8")}`);
 const curl = (ca) =>
   new Promise((r) =>
-    execFile("curl", ["-s", "-o", os.devNull, "-w", "%{http_code}", "--max-time", "10", "-x", `http://127.0.0.1:${proxy.port}`, "--cacert", ca, "https://www.youtube.com/s/player/base.js"], (err, out) =>
+    execFile("curl", ["--tls-max", "1.2", "--noproxy", "", "-s", "-o", os.devNull, "-w", "%{http_code}", "--max-time", "10", "-x", `http://127.0.0.1:${proxy.port}`, "--cacert", ca, "https://www.youtube.com/s/player/base.js"], (err, out) =>
       r(err ? `exit ${err.code}` : out),
     ),
   );
 const own = path.join(dir, "c.pem");
 assert.match(await curl(own), /^exit /, "refused Zeno's certificate");
+// curl can exit before Node has processed the peer's TLS alert.
+for (let n = 0; !notices.length && n < 100; n++) await new Promise((r) => setTimeout(r, 10));
 assert.equal(notices.length, 1, "told once");
 assert.equal(await curl(own), "200", "next time: YouTube's own certificate, untouched");
 assert.equal(JSON.parse(readFileSync(path.join(process.env.HOME, ".config", "zeno-vpn", "youtube.json"), "utf8")).refuse.length, 1, "kept");
