@@ -24,9 +24,14 @@ try {
 }
 assert.deepEqual(desktopApp(), repoElectron && { path: repoElectron, args: [gui] }, "the repo's own desktop app");
 
+// A screen is available for this case; headless behavior is checked separately below.
+const initialDisplay = process.env.DISPLAY;
+process.env.DISPLAY ||= ':99';
 // no desktop app, no Firefox: said, and what to get
 await assert.rejects(signInWindow(undefined, undefined, null, null), /isn't available right now: .*desktop app, or a Firefox of its own, and neither is on this computer.*releases/s);
 
+if (initialDisplay === undefined) delete process.env.DISPLAY;
+else process.env.DISPLAY = initialDisplay;
 // Linux: no screen (a container, SSH) is said first, whatever's here; Firefox is looked for on the PATH
 const platform = Object.getOwnPropertyDescriptor(process, "platform");
 const { DISPLAY, WAYLAND_DISPLAY, PATH } = process.env;
