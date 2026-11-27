@@ -24,11 +24,8 @@ jobs:
       - name: Import pinned MIT source and apply Zeno identity
         run: |
           rsync -a --exclude=.git --exclude=.github _upstream/ ./
-          cp _upstream/.github/workflows/release.yml .github/workflows/release.yml
           rm -rf _upstream
           python .zeno/brand.py
-          cp .zeno/ci.yml .github/workflows/ci.yml
-          cp .zeno/android.yml .github/workflows/android.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .
