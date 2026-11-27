@@ -10,7 +10,7 @@ def convert(text):
             .replace('io_github_diercohen_foxhole', 'io_github_sahandse_zeno').replace('FOXHOLE', 'ZENO').replace('Foxhole', 'Zeno').replace('foxhole', 'zeno'))
 
 for p in list(root.rglob('*')):
-    if not p.is_file() or any(x in {'.git', '.zeno', 'node_modules'} for x in p.relative_to(root).parts) or p.name == 'LICENSE':
+    if not p.is_file() or any(x in {'.git', '.zeno', 'node_modules'} for x in p.relative_to(root).parts) or p.name in {'LICENSE', 'bootstrap.yml'}:
         continue
     try:
         old = p.read_text(encoding='utf-8')
