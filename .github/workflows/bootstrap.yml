@@ -1,0 +1,47 @@
+name: Initialize and verify Zeno
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/bootstrap.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  initialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require an empty application repository
+        run: test ! -f package.json
+      - uses: actions/checkout@v4
+        with:
+          repository: DierCohen/foxhole-vpn
+          ref: bf841f06c9f01896271b596142a3d846ea9298bd
+          path: _upstream
+          persist-credentials: false
+      - name: Import pinned MIT source and apply Zeno identity
+        run: |
+          rsync -a --exclude=.git --exclude=.github _upstream/ ./
+          cp _upstream/.github/workflows/release.yml .github/workflows/release.yml
+          rm -rf _upstream
+          python .zeno/brand.py
+          cp .zeno/ci.yml .github/workflows/ci.yml
+          cp .zeno/android.yml .github/workflows/android.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .
+          git commit -m 'feat: initialize Zeno from Foxhole 1.3.3 with independent app and updater identity'
+          git push origin HEAD:main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Desktop tests
+        run: |
+          cd gui
+          npm ci
+          npm test
