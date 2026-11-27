@@ -49,6 +49,7 @@ assert.deepEqual(firefox(), { path: existsSync(official) ? official : "firefox",
 Object.defineProperty(process, "platform", platform);
 Object.assign(process.env, { PATH }, DISPLAY === undefined ? {} : { DISPLAY }, WAYLAND_DISPLAY === undefined ? {} : { WAYLAND_DISPLAY });
 if (WAYLAND_DISPLAY === undefined) delete process.env.WAYLAND_DISPLAY;
+process.env.DISPLAY ||= ":99"; // the following fake windows do not require an actual X server
 
 // a stand-in for the app: as STUB says, signed in, closed first, crashed, waits, or says a session that isn't one
 const stub = join(home, "app.mjs");
