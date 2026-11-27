@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"> <!-- the phone apps (desktop windows ignore it); iOS zooms into a focused field otherwise -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'">
+<title>Zeno</title>
+<link rel="stylesheet" href="style.css">
+<script src="fa.js" defer></script>
+<script src="ru.js" defer></script>
+<script src="app.js" defer></script>
+<script src="fox3d.js" defer></script>
+</head>
+<body data-phase="off">
+
+<!-- Icons and the fox, drawn once and used by reference. Not display:none: gradients in a hidden SVG don't paint. -->
+<svg class="sprite" aria-hidden="true">
+  <defs>
+    <linearGradient id="g-fox" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#ffc061"/><stop offset=".45" stop-color="#ff7a1a"/><stop offset="1" stop-color="#ff3d5a"/>
+    </linearGradient>
+    <linearGradient id="g-cheek" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff8ef"/><stop offset="1" stop-color="#ffd9c2"/>
+    </linearGradient>
+    <linearGradient id="g-ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2ef2b0"/><stop offset="1" stop-color="#45b6ff"/>
+    </linearGradient>
+  </defs>
+  <symbol id="fox" viewBox="0 0 64 64">
+    <path fill="url(#g-fox)" d="M32 57 12.5 39 8 21 10.5 5 24.5 16.5 32 15 39.5 16.5 53.5 5 56 21 51.5 39Z"/>
+    <path fill="#2a1430" opacity=".85" d="M12.6 10.6 21.2 17.6 14.4 21.4ZM51.4 10.6 42.8 17.6 49.6 21.4Z"/>
+    <path fill="#fff" opacity=".22" d="M32 15 24.5 16.5 32 31Z"/>
+    <path fill="#fff" opacity=".1" d="M32 15 39.5 16.5 32 31Z"/>
+    <path fill="url(#g-cheek)" d="M8 21 26 35 32 50 32 57 12.5 39ZM56 21 38 35 32 50 32 57 51.5 39Z"/>
+    <path fill="#2a1430" d="M20.4 28.4 27.2 31.2 21.6 32.6ZM43.6 28.4 36.8 31.2 42.4 32.6ZM28.4 51 35.6 51 32 56.6Z"/>
+  </symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8.5"/><path class="arc" d="M6.3 6.8a8 8 0 1 0 11.4 0"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2.5 9a14 14 0 0 1 19 0"/><path d="M5.6 12.4a9.5 9.5 0 0 1 12.8 0"/><path d="M8.7 15.8a5 5 0 0 1 6.6 0"/><path d="M12 19.5h.01"/></symbol>
+  <symbol id="i-wifi-off" viewBox="0 0 24 24"><path d="M2.5 9a14 14 0 0 1 4.6-3"/><path d="M11 4.6A14 14 0 0 1 21.5 9"/><path d="M5.6 12.4a9.5 9.5 0 0 1 4.2-2.3"/><path d="M15.4 10.9a9.5 9.5 0 0 1 3 1.5"/><path d="M8.7 15.8a5 5 0 0 1 6.6 0"/><path d="M12 19.5h.01"/><path d="M3.5 3.5l17 17"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.6 2.6 3.8 5.6 3.8 9s-1.2 6.4-3.8 9c-2.6-2.6-3.8-5.6-3.8-9S9.4 5.6 12 3z"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v4M15 3v4"/><path d="M6 7h12v3.5a6 6 0 0 1-12 0z"/><path d="M12 16.5V21"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/></symbol>
+  <symbol id="i-telegram" viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></symbol>
+  <symbol id="i-split" viewBox="0 0 24 24"><path d="M3 6h4.5l9 12H21"/><path d="M3 18h4.5l2.6-3.4"/><path d="M13.9 9.4 16.5 6H21"/><path d="M18 3l3 3-3 3"/><path d="M18 15l3 3-3 3"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3.5"/><path d="m7.5 9.5 3 2.5-3 2.5M13 15h4"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2.8"/><path d="M15.5 4.8A2.5 2.5 0 0 0 13.2 3.5H6A2.5 2.5 0 0 0 3.5 6v7.2a2.5 2.5 0 0 0 1.3 2.3"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7h15M10 11v6M14 11v6"/><path d="m6.5 7 .9 11.6A2.5 2.5 0 0 0 9.9 21h4.2a2.5 2.5 0 0 0 2.5-2.4L17.5 7"/><path d="M9.5 7V4.5h5V7"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-apps" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.8"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.8"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.8"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.8"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.8"/><path d="m20 20-4.2-4.2"/></symbol>
+  <symbol id="i-calc" viewBox="0 0 24 24"><rect x="5" y="2.5" width="14" height="19" rx="2.8"/><path d="M8.5 6.5h7"/><path d="M8.5 11h.01M12 11h.01M15.5 11h.01M8.5 14.5h.01M12 14.5h.01M15.5 14.5h.01M8.5 18h.01M12 18h.01M15.5 18h.01"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10" rx="2.8"/><path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"/><path d="M12 14.5v2"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.7-4.4L4 8"/><path d="M4 3.5V8h4.5"/><path d="M4 13a8 8 0 0 0 14.7 4.4L20 16"/><path d="M20 20.5V16h-4.5"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-8.5 8.5"/><path d="M18 14v3.5a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 4 17.5v-9A2.5 2.5 0 0 1 6.5 6H10"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 19.5 6v5.6c0 4.4-3.1 8.2-7.5 9.4-4.4-1.2-7.5-5-7.5-9.4V6z"/><path d="m8.8 12 2.3 2.3 4.3-4.6"/></symbol>
+  <symbol id="i-relay" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.2"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6"/><path d="M5.2 5.2a9.6 9.6 0 0 0 0 13.6M18.8 5.2a9.6 9.6 0 0 1 0 13.6"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.5" rx="2.5"/><path d="M8.5 20.5h7M12 16.5v4"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.8"/><path d="M11 18.5h2"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5 13.7 9 19 10.5 13.7 12.3 12 17.5 10.3 12.3 5 10.5 10.3 9z"/><path d="M18.5 16.5 19 18l1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5.5M6 11.5l6-6 6 6"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9.5 6 6 6-6 6"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><path d="M4 4l16 16"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
+  <!-- Shield's lists (and eye, share, lock above) -->
+  <symbol id="i-bug" viewBox="0 0 24 24"><rect x="7.5" y="8" width="9" height="12.5" rx="4.5"/><path d="M9.5 8V6.8a2.5 2.5 0 0 1 5 0V8"/><path d="M12 12.5v8"/><path d="M7.5 13H4M20 13h-3.5M7.9 17.3 5 19.5M16.1 17.3l2.9 2.2M8 9.8 5.2 7.6M16 9.8l2.8-2.2"/></symbol>
+  <symbol id="i-eggplant" viewBox="0 0 24 24"><path d="M14.45 7.86C13.88 9.01 12.86 10.15 11.03 10.89 8.75 11.69 6.47 12.03 5.04 13 3.73 13.85 3.5 15.57 3.61 17.56 3.84 19.56 5.9 20.41 8.18 20.41 11.6 20.3 15.02 17.85 17.02 14.71 18.16 12.83 18.9 11 19.24 9.58"/><path d="M13.77 7.46C14 5.98 15.31 5.18 16.85 5.13 18.56 5.13 20.04 6.27 20.39 8.15 20.5 8.72 20.44 9.29 20.27 9.75L19.47 8.49C18.73 7.86 17.88 8.04 17.13 8.72L16.62 7.58C16.28 6.89 15.59 6.84 14.91 7.07Z"/><path d="M18.56 5.3C18.67 4.61 18.9 4.04 19.36 3.76 19.59 3.59 19.93 3.59 20.16 3.64"/><path d="M6.3 16.1C6.3 15.5 6.7 15 7.3 14.8"/></symbol>
+  <symbol id="i-dice" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3.5"/><path d="M8.5 8.5h.01M15.5 8.5h.01M12 12h.01M8.5 15.5h.01M15.5 15.5h.01"/></symbol>
+  <symbol id="i-hook" viewBox="0 0 24 24"><circle cx="15" cy="4.2" r="1.7"/><path d="M15 5.9v7.6a4.5 4.5 0 0 1-9 0v-3l2.6 2.6"/></symbol>
+  <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M14.6 9.4c-.4-.9-1.4-1.5-2.6-1.5-1.5 0-2.6.8-2.6 1.9 0 2.6 5.3 1.5 5.3 4.3 0 1.1-1.1 2-2.7 2-1.3 0-2.3-.6-2.7-1.6M12 6.4v1.5M12 16.1v1.5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="14" rx="4"/><path d="m10 9.3 4.8 2.7-4.8 2.7z"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M14 4h3.5A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5H14"/><path d="m9.5 8-4 4 4 4M5.5 12H15"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><circle cx="17.5" cy="5.5" r="2.8"/><circle cx="6.5" cy="12" r="2.8"/><circle cx="17.5" cy="18.5" r="2.8"/><path d="m9 10.6 6-3.6M9 13.4l6 3.6"/></symbol>
+  <symbol id="i-tv" viewBox="0 0 24 24"><rect x="2.5" y="5" width="19" height="12.5" rx="2.5"/><path d="M8 21h8M9 2.5l3 2.5 3-2.5"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4.5 7.5h3l1.8-2.5h5.4l1.8 2.5h3A1.5 1.5 0 0 1 21 9v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18V9a1.5 1.5 0 0 1 1.5-1.5z"/><circle cx="12" cy="13" r="3.6"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20.5a7.5 7.5 0 0 1 15 0"/></symbol>
+  <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></symbol>
+</svg>
+
+<div class="bg" aria-hidden="true">
+  <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+  <div class="dots"></div>
+  <div class="embers" id="embers"></div>
+  <div class="noise"></div>
+</div>
+
+<header class="titlebar">
+  <div class="brand">
+    <svg class="logo"><use href="#fox"/></svg>
+    <span class="word">Zeno</span>
+    <span class="ver" id="ver"></span>
+  </div>
+  <div class="grow"></div>
+  <button class="pill update" id="update" hidden><svg class="i"><use href="#i-up"/></svg><span></span></button>
+  <button class="chip data" id="data-chip" aria-label="Data: what's left, and the sites that spend it">
+    <svg class="gauge" viewBox="0 0 36 36" aria-hidden="true">
+      <circle class="track" cx="18" cy="18" r="15"/>
+      <circle class="bar" id="data-ring" cx="18" cy="18" r="15" transform="rotate(-90 18 18)"/>
+    </svg>
+    <div class="txt"><span class="k" id="data-k">Data</span><span class="v" id="data-v">—</span></div>
+  </button>
+  <button class="chip account" id="account" title="Account and settings">
+    <span class="avatar" id="acct-avatar">?</span><span class="name" id="acct-name"></span>
+  </button>
+  <button class="icon-btn" id="open-logs" title="Logs"><svg class="i"><use href="#i-terminal"/></svg></button>
+  <button class="icon-btn" id="open-settings" title="Settings"><svg class="i"><use href="#i-sliders"/></svg></button>
+</header>
+
+<main class="stage">
+  <section class="hero glass spot rise" style="--d:1">
+    <div class="toast" id="toast" role="status"><i class="dot"></i><span id="toast-text"></span></div>
+
+    <div class="orb-wrap" id="orb-wrap">
+      <div class="halo"></div>
+      <div class="ripple"></div><div class="ripple"></div><div class="ripple"></div>
+      <svg class="ticks" id="ticks" viewBox="0 0 300 300" aria-hidden="true"></svg>
+      <div class="ring glow"><i></i></div>
+      <div class="ring"><i></i></div>
+      <button class="orb" id="orb" aria-label="Connect">
+        <svg class="power"><use href="#i-power"/></svg>
+        <span class="orb-label" id="orb-label">Connect</span>
+      </button>
+      <canvas class="fox3d" id="fox3d" aria-hidden="true"></canvas>
+      <div class="zzz" aria-hidden="true"><i>z</i><i>z</i><i>z</i></div>
+    </div>
+
+    <div class="status">
+      <h1 id="status-title">Not connected</h1>
+      <p id="status-sub"></p>
+    </div>
+
+    <div class="seg mode" id="mode" data-v="0">
+      <span class="thumb"></span>
+      <button data-mode="proxy"><svg class="i"><use href="#i-plug"/></svg>Proxy only</button>
+      <button data-mode="global"><svg class="i"><use href="#i-monitor"/></svg>Whole system</button>
+    </div>
+
+    <div class="cards">
+      <!-- a phone's: the Locations as a sheet, in place of a long list to scroll down to (style.css) -->
+      <button class="card link" id="c-loc"><span id="loc-flag"></span><div class="body"><div class="k">Location</div><div class="v"></div><div class="s">Tap to change</div></div><svg class="i chev"><use href="#i-chevron"/></svg></button>
+      <div class="card" id="c-net"><span class="ico"><svg class="i"><use href="#i-wifi"/></svg></span><div class="body"><div class="k">Network</div><div class="v"></div><div class="s"></div></div></div>
+      <div class="card" id="c-proxy"><span class="ico"><svg class="i"><use href="#i-plug"/></svg></span><div class="body"><div class="k">Proxy</div><div class="v"></div><div class="s"></div></div><button class="mini" id="tg-proxy" title="Use in Telegram: it asks to use this proxy" hidden><svg class="i"><use href="#i-telegram"/></svg></button><button class="mini copy" id="copy-proxy" title="Copy the address" hidden><svg class="i"><use href="#i-copy"/></svg></button></div>
+      <button class="card link" id="c-split"><span class="ico"><svg class="i"><use href="#i-split"/></svg></span><div class="body"><div class="k">Split tunneling</div><div class="v"></div><div class="s" id="split-card-s">Choose sites and apps that skip the VPN</div></div><svg class="i chev"><use href="#i-chevron"/></svg></button>
+      <button class="card link" id="c-shield"><span class="ico"><svg class="i"><use href="#i-shield"/></svg></span><div class="body"><div class="k">Shield</div><div class="v"></div><div class="s"></div></div><svg class="i chev"><use href="#i-chevron"/></svg><span class="tier new">New</span></button>
+    </div>
+  </section>
+
+  <aside class="locations glass spot rise" id="sheet-locations" style="--d:2">
+    <div class="loc-head"><h2>Locations</h2><span id="loc-count"></span><button class="icon-btn close" data-close title="Close"><svg class="i"><use href="#i-close"/></svg></button></div>
+    <label class="search"><svg class="i"><use href="#i-search"/></svg><input id="search" dir="auto" placeholder="Search countries" spellcheck="false" autocomplete="off"></label>
+    <div class="list" id="list"></div>
+    <div class="tip">
+      <svg class="i"><use href="#i-spark"/></svg>
+      <p data-t>Claude, ChatGPT, Gemini, Netflix, YouTube Music, Spotify and banks often block shared VPN IPs: pick a <b>paid</b> location for them. Zeno made the paid servers <em>free</em> for you.</p>
+    </div>
+  </aside>
+</main>
+
+<div class="scrim" id="scrim"></div>
+
+<section class="sheet glass" id="sheet-split" aria-label="Split tunneling">
+  <header><span class="badge"><svg class="i"><use href="#i-split"/></svg></span><div><h2>Split tunneling</h2><p id="split-what">Choose which sites and apps use the VPN and which go direct.</p></div><button class="icon-btn close" data-close><svg class="i"><use href="#i-close"/></svg></button></header>
+  <div class="scroll">
+    <div class="group">
+      <div class="row-line">
+        <div><div class="label">Everything else</div><div class="hint" id="split-default-hint"></div></div>
+        <div class="seg small" id="split-default" data-v="0"><span class="thumb"></span><button data-via="vpn">VPN</button><button data-via="direct">Direct</button></div>
+      </div>
+      <div class="smart" id="split-smart">
+        <div class="row-line">
+          <span class="flag code">IR</span>
+          <div><b>Iranian sites direct</b><span id="smart-hint"></span></div>
+          <button class="switch" id="smart" role="switch" aria-checked="false" aria-label="Iranian sites direct"></button>
+        </div>
+        <div class="row-line" id="probe-row">
+          <span class="dot"><svg class="i"><use href="#i-spark"/></svg></span>
+          <div><b>Save data</b><span id="probe-hint"></span></div>
+          <button class="switch" id="probe" role="switch" aria-checked="false" aria-label="Save data"></button>
+        </div>
+      </div>
+    </div>
+    <form class="group" id="split-add">
+      <div class="label" id="split-add-label">Add a site or app</div>
+      <div class="input-row">
+        <input id="split-input" placeholder="bbc.co.uk, *.ir, 1.2.3.4 or an app: Telegram" spellcheck="false" autocomplete="off">
+        <button class="btn" type="button" id="split-check-btn" title="Is it blocked or sanctioned here? It's tried directly and through the VPN"><svg class="i"><use href="#i-search"/></svg><span>Check</span></button>
+        <button class="btn primary" type="submit"><svg class="i"><use href="#i-plus"/></svg>Add</button>
+      </div>
+      <div class="check" id="split-check" aria-live="polite" hidden></div>
+      <div class="hint" id="split-new-hint"></div>
+      <div class="note" id="split-note"></div>
+      <div class="chips" id="split-recent"></div>
+      <div class="chips" id="split-apps"></div>
+      <div class="hint" id="split-apps-hint"></div>
+    </form>
+    <div class="group">
+      <div class="label"><span id="split-list-label">Sites and apps</span> <span class="count" id="split-count"></span></div>
+      <div class="rules" id="split-rules"></div>
+    </div>
+    <p class="fine" id="split-fine">An app's rule covers all its connections; a site covers its subdomains, and the most specific rule wins. Direct sites and apps see your real IP. Changes apply to new connections.</p>
+  </div>
+</section>
+
+<!-- Shield (blocker.ts): block lists, laid out as Windscribe's R.O.B.E.R.T., YouTube's ads, and the user's own rules -->
+<section class="sheet glass" id="sheet-shield" aria-label="Shield">
+  <header><span class="badge"><svg class="i"><use href="#i-shield"/></svg></span><div><h2>Shield</h2><p>Blocks ads, trackers, malware and more before they load.</p></div><button class="icon-btn close" data-close><svg class="i"><use href="#i-close"/></svg></button></header>
+  <div class="scroll">
+    <div class="group">
+      <div class="shield-info"><svg class="i"><use href="#i-shield"/></svg><p id="shield-info"></p></div>
+      <div class="shield-lists" id="shield-youtube"></div>
+      <div class="shield-lists" id="shield-lists"></div>
+    </div>
+    <details class="group" id="shield-custom">
+      <summary class="label"><svg class="i"><use href="#i-sliders"/></svg><span>Manage custom rules</span> <span class="count" id="shield-count"></span><svg class="i chev"><use href="#i-chevron"/></svg></summary>
+      <form id="shield-add">
+        <div class="input-row">
+          <input id="shield-input" placeholder="ads.example.com" spellcheck="false" autocomplete="off" dir="ltr">
+          <button class="btn" type="submit" data-allow title="Let it through, whatever list has it">Allow</button>
+          <button class="btn primary" type="submit"><svg class="i"><use href="#i-plus"/></svg>Block</button>
+        </div>
+        <div class="note" id="shield-note"></div>
+      </form>
+      <div class="rules" id="shield-rules"></div>
+      <p class="fine">A rule covers the site's subdomains, and the most specific one wins: block a site no list has, or allow one a list blocks. Changes apply to new connections.</p>
+    </details>
+  </div>
+</section>
+
+<section class="sheet glass" id="sheet-settings" aria-label="Settings">
+  <header><span class="badge"><svg class="i"><use href="#i-sliders"/></svg></span><div><h2>Settings</h2><p>The proxy, sharing it, and your account.</p></div><button class="icon-btn close" data-close><svg class="i"><use href="#i-close"/></svg></button></header>
+  <div class="scroll">
+    <div class="group" id="lang-group" hidden>
+      <div class="label"><svg class="i"><use href="#i-globe"/></svg>Language</div>
+      <div class="seg small three" id="lang" data-v="0"><span class="thumb"></span><button type="button" data-lang="en" lang="en">English</button><button type="button" data-lang="fa" lang="fa">فارسی</button><button type="button" data-lang="ru" lang="ru">Русский</button></div>
+    </div>
+    <div class="group desktop-only" id="autostart-group" hidden>
+      <div class="row-line">
+        <div><div class="label"><svg class="i"><use href="#i-power"/></svg>Start when you log in</div><div class="hint" id="autostart-hint"></div></div>
+        <button class="switch" id="autostart" role="switch" aria-checked="false" aria-label="Start when you log in"></button>
+      </div>
+    </div>
+    <div class="group not-tv" id="net-group" hidden>
+      <div class="label"><svg class="i"><use href="#i-wifi"/></svg>On this network</div>
+      <div class="hint" id="net-hint"></div>
+      <div class="seg small three" id="net-rule" data-v="0"><span class="thumb"></span><button type="button" data-net-rule="">Nothing</button><button type="button" data-net-rule="connect">Connect</button><button type="button" data-net-rule="pause">Pause</button></div>
+      <div class="chips" id="net-rules"></div>
+    </div>
+    <div class="group" id="share-group">
+      <div class="row-line">
+        <div><div class="label"><svg class="i"><use href="#i-phone"/></svg>Share with devices on this network</div><div class="hint" id="share-hint"></div></div>
+        <button class="switch" id="share" role="switch" aria-checked="false" aria-label="Share with devices on this network"></button>
+      </div>
+      <div class="share-box" id="share-box"></div>
+    </div>
+    <!-- the proxy's port, and (sharing on) its login: one section with the sharing above (style.css) -->
+    <form class="group" id="port-form">
+      <div class="label"><svg class="i"><use href="#i-plug"/></svg>Proxy port</div>
+      <div class="input-row">
+        <input id="port" inputmode="numeric" maxlength="5" autocomplete="off">
+        <button class="btn" type="submit">Save</button>
+      </div>
+      <div class="hint">One port serves SOCKS5 and HTTP. Default 1080.</div>
+    </form>
+    <form class="group" id="login-form" hidden>
+      <div class="label"><svg class="i"><use href="#i-lock"/></svg>Login for other devices</div>
+      <input id="username" placeholder="Username (optional)" autocomplete="off" spellcheck="false">
+      <div class="input-row">
+        <div class="pw-wrap"><input id="password" type="password" placeholder="Password (optional)" autocomplete="off"><button class="mini" type="button" id="reveal" title="Show"><svg class="i"><use href="#i-eye"/></svg></button></div>
+        <button class="btn" type="submit">Save</button>
+      </div>
+      <div class="hint">Asked from other devices when sharing is on; apps on this computer don't need it. Empty means no login.</div>
+    </form>
+    <!-- Share Zeno: hidden for now (app.js SHARE_ZENO shows it again) -->
+    <div class="group not-tv" id="give-group" hidden>
+      <div class="label"><svg class="i"><use href="#i-share"/></svg>Share Zeno</div>
+      <div class="hint" id="give-hint"></div>
+      <div class="row-btns">
+        <button class="btn" type="button" id="give-open"><svg class="i"><use href="#i-share"/></svg>Share</button>
+        <button class="btn" type="button" id="take-open"><svg class="i"><use href="#i-plus"/></svg>Import settings</button>
+      </div>
+    </div>
+    <form class="group android-only not-tv" id="disguise-form">
+      <div class="label"><svg class="i"><use href="#i-calc"/></svg>Look like a calculator</div>
+      <div class="hint" id="disguise-hint"></div>
+      <div class="input-row" id="disguise-set">
+        <input id="disguise-code" inputmode="numeric" maxlength="12" placeholder="A code of 4 to 12 digits" autocomplete="off">
+        <button class="btn primary" type="submit">Disguise</button>
+      </div>
+      <button class="btn" type="button" id="disguise-off" hidden>Show Zeno again</button>
+    </form>
+    <div class="group" id="dns-group" hidden>
+      <div class="row-line">
+        <div><div class="label"><svg class="i"><use href="#i-tv"/></svg>Smart DNS for a TV or console</div><div class="hint" id="dns-hint"></div></div>
+        <button class="switch" id="smart-dns" role="switch" aria-checked="false" aria-label="Smart DNS for a TV or console"></button>
+      </div>
+      <div class="share-box" id="dns-box"></div>
+    </div>
+    <div class="relay-zone">
+      <form class="group" id="relay-form">
+        <div class="label"><svg class="i"><use href="#i-shield"/></svg>VPN relay<span class="tier" id="relay-badge"></span></div>
+        <div class="hint" id="relay-about"></div>
+        <div class="hint" id="relay-state"></div>
+        <input class="not-tv" id="relay-id" placeholder="Apps Script deployment ID" autocomplete="off" spellcheck="false">
+        <div class="pw-wrap not-tv"><input id="relay-key" type="password" placeholder="Auth key" autocomplete="off"><button class="mini" type="button" id="relay-reveal" title="Show"><svg class="i"><use href="#i-eye"/></svg></button></div>
+        <div class="cert-line">
+          <button class="btn primary wizard-btn desktop-only" type="button" id="relay-wizard"><svg class="i"><use href="#i-spark"/></svg>Set up step by step</button>
+          <!-- a phone or TV gets one made on a computer (app.js relayWait) -->
+          <button class="btn primary wizard-btn android-only" type="button" id="relay-get"><svg class="i"><use href="#i-relay"/></svg><span></span></button>
+          <button class="btn" type="button" id="relay-check"><svg class="i"><use href="#i-plug"/></svg>Check</button>
+        </div>
+        <div class="row-btns" id="relay-more">
+          <button class="btn not-tv" type="button" id="relay-send"><svg class="i"><use href="#i-share"/></svg>Send to a TV or phone</button>
+          <button class="btn tv-only" type="button" id="relay-remove"><svg class="i"><use href="#i-logout"/></svg>Remove</button>
+        </div>
+        <div class="note" id="relay-check-state"></div>
+      </form>
+      <div class="group not-tv" id="cert-group">
+        <div class="label"><svg class="i"><use href="#i-lock"/></svg>Relay certificate</div>
+        <div class="hint">The relay can only fetch web pages, so Zeno opens each site's encryption on this computer, with certificates from its own authority: made here, and never sent anywhere. Browsers and apps trust it once.</div>
+        <div class="cert-line"><span id="cert-state"></span><button class="btn" type="button" id="cert-btn"></button></div>
+        <div class="hint desktop-only">Terminal tools (npm, pip, git, curl…) keep their own list: paste this into a terminal and they trust it too, and use the proxy.</div>
+        <button class="btn desktop-only" type="button" data-act="copyEnv" data-copied><svg class="i"><use href="#i-copy"/></svg>Copy terminal setup</button>
+      </div>
+    </div>
+    <div class="note" id="settings-note"></div>
+    <div class="group">
+      <div class="label"><svg class="i"><use href="#i-user"/></svg>Mozilla accounts</div>
+      <div class="hint">The VPN uses the one in use, from now on too. Tap another to switch to it.</div>
+      <div class="accounts" id="accounts"></div>
+      <div class="row-btns">
+        <button class="btn" type="button" id="add-account"><svg class="i"><use href="#i-plus"/></svg>Add account</button>
+        <button class="btn" type="button" id="tvsend-open"><svg class="i"><use href="#i-tv"/></svg>Sign in a TV or phone</button>
+      </div>
+    </div>
+    <div class="group about">
+      <svg class="logo"><use href="#fox"/></svg>
+      <div class="grow"><b>Zeno <span id="about-ver"></span></b><span id="about-update">Firefox's free VPN for your whole system. Unofficial, not affiliated with Mozilla.</span></div>
+      <button class="btn" id="open-repo"><svg class="i"><use href="#i-github"/></svg>GitHub</button>
+    </div>
+  </div>
+</section>
+
+<section class="sheet glass" id="sheet-data" aria-label="Data">
+  <header><span class="badge"><svg class="i"><use href="#i-chart"/></svg></span><div><h2>Data</h2><p>This month's VPN data, and the sites that spend it.</p></div><button class="icon-btn close" data-close><svg class="i"><use href="#i-close"/></svg></button></header>
+  <div class="scroll">
+    <div class="group">
+      <div class="data-left" id="data-left"></div>
+      <div class="hint" id="data-pace"></div>
+    </div>
+    <div class="group">
+      <div class="label">Through the VPN <span class="count" id="data-since"></span></div>
+      <div class="rules" id="data-sites"></div>
+      <div class="hint" id="data-direct"></div>
+    </div>
+    <div class="group" id="data-hidden-group" hidden>
+      <div class="row-line">
+        <div><div class="label"><svg class="i"><use href="#i-eye"/></svg>Show hidden sites</div><div class="hint" id="data-hidden-hint"></div></div>
+        <button class="switch" id="data-show-hidden" role="switch" aria-checked="false" aria-label="Show hidden sites"></button>
+      </div>
+    </div>
+    <p class="fine" id="data-fine">Counted by Zeno on this computer, the sites' own data only. Your other devices on this account spend the same month's data.</p>
+  </div>
+</section>
+
+<section class="sheet glass wide" id="sheet-logs" aria-label="Logs">
+  <header><span class="badge"><svg class="i"><use href="#i-terminal"/></svg></span><div><h2>Logs</h2><p id="logs-count">Proxy failures and tun2socks output, live.</p></div><button class="btn" id="copy-logs"><svg class="i"><use href="#i-copy"/></svg>Copy all</button><button class="icon-btn close" data-close><svg class="i"><use href="#i-close"/></svg></button></header>
+  <div class="logs" id="logs"></div>
+</section>
+
+<div class="modal" id="pw-modal">
+  <form class="box glass" id="pw-form">
+    <div class="lock-orb"><svg class="i"><use href="#i-lock"/></svg></div>
+    <h2>Administrator password</h2>
+    <p id="pw-why">Whole-system mode routes all of this computer's traffic through the VPN, which needs administrator rights. Enter your <b>login password</b> (used by sudo):</p>
+    <input type="password" id="pw-input" placeholder="Login password" autocomplete="off" aria-label="Login password">
+    <div class="note" id="pw-note"></div>
+    <div class="actions">
+      <button class="btn" type="button" id="pw-cancel">Cancel</button>
+      <button class="btn primary" type="submit" id="pw-ok"><span>Go whole system</span></button>
+    </div>
+  </form>
+</div>
+
+<!-- An update downloaded and installed: restart into it now, or later -->
+<!-- vpn.mozilla.org doesn't connect while Google does: blocked here; a relay gets around it -->
+<div class="modal backdrop" id="blocked-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-shield"/></svg></div>
+    <h2 id="blocked-title">Mozilla's VPN service is blocked here</h2>
+    <p id="blocked-why">It seems your government or internet provider blocks Firefox's VPN service (vpn.mozilla.org) in your country.</p>
+    <p class="relay-only" id="blocked-how">A relay gets around it: a free script on your own Google account that asks Mozilla for Zeno, from Google. Setting it up takes a few minutes, and Zeno shows you each click.</p>
+    <!-- a phone's or TV's: the relay's made on a computer, then brought here by its code (app.js relayWait) -->
+    <ol class="steps android-only" id="blocked-steps"></ol>
+    <div class="actions">
+      <button class="btn" type="button" id="blocked-later">Not now</button>
+      <button class="btn primary relay-only" type="button" id="blocked-setup"><svg class="i"><use href="#i-spark"/></svg><span>Set up a relay</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- Relay in Locations, not set up yet: what it is, and its setup -->
+<div class="modal backdrop" id="relay-modal">
+  <div class="box glass">
+    <div class="lock-orb relay"><svg class="i"><use href="#i-relay"/></svg></div>
+    <h2>Relay: your own way through</h2>
+    <p>A free script on your own Google account fetches the web for you. Your internet provider sees only a visit to Google, so Relay gets through where Firefox VPN is blocked (e.g. Iran), and lets Zeno reach Firefox VPN there too.</p>
+    <p id="relay-intro-how">It carries web pages only, and sites can still see your IP. Setting it up takes a few minutes, and Zeno shows you each click.</p>
+    <div class="actions">
+      <button class="btn" type="button" id="relay-later">Not now</button>
+      <button class="btn primary" type="button" id="relay-setup"><svg class="i"><use href="#i-spark"/></svg><span>Set up step by step</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- relay mode: this computer doesn't trust Zeno's certificate yet, so sites won't open -->
+<div class="modal backdrop relay" id="trust-modal">
+  <div class="box glass">
+    <div class="lock-orb relay"><svg class="i"><use href="#i-lock"/></svg></div>
+    <h2>One more step: trust Zeno's certificate</h2>
+    <p id="trust-why">The relay can only fetch web pages, so Zeno opens each site's encryption on this computer to carry it, with certificates from its own authority: made on this computer, and never sent anywhere.</p>
+    <p id="trust-how"></p>
+    <div class="actions">
+      <button class="btn" type="button" id="trust-later">Not now</button>
+      <button class="btn primary" type="button" id="trust-ok"><svg class="i"><use href="#i-shield"/></svg>Trust it</button>
+    </div>
+  </div>
+</div>
+
+<!-- A new version: what's new in it, before it's downloaded (app.js showNotes) -->
+<div class="modal backdrop" id="notes-modal" role="dialog" aria-modal="true" aria-labelledby="notes-title">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-up"/></svg></div>
+    <h2 id="notes-title"></h2>
+    <div class="notes" id="notes-body" tabindex="0"></div>
+    <div class="actions">
+      <button class="btn" type="button" id="notes-later">Later</button>
+      <button class="btn primary" type="button" id="notes-update"></button>
+    </div>
+  </div>
+</div>
+
+<div class="modal backdrop" id="update-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-up"/></svg></div>
+    <h2>The update is ready</h2>
+    <p>Restart Zeno to switch to the new version. The VPN drops for a few seconds and connects again by itself.</p>
+    <div class="actions">
+      <button class="btn" type="button" id="up-later">Later</button>
+      <button class="btn primary" type="button" id="up-restart">Restart now</button>
+    </div>
+  </div>
+</div>
+
+<!-- Another account: Zeno's own sign-in, or Firefox's (app.js choices()) -->
+<div class="modal backdrop" id="add-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-user"/></svg></div>
+    <h2>Add a Mozilla account</h2>
+    <div class="choices" id="add-choices"></div>
+    <span class="link fine" id="add-later">Cancel</span>
+  </div>
+</div>
+
+<!-- Split tunneling: every app on this device, to pick one by name (app.js openPicker) -->
+<div class="modal backdrop" id="apps-modal" role="dialog" aria-modal="true" aria-labelledby="apps-title">
+  <div class="box glass picker">
+    <header>
+      <div><h2 id="apps-title">Pick an app</h2><p id="apps-count"></p></div>
+      <button class="icon-btn close" id="apps-close" title="Close"><svg class="i"><use href="#i-close"/></svg></button>
+    </header>
+    <label class="search"><svg class="i"><use href="#i-search"/></svg><input id="apps-search" dir="auto" type="search" placeholder="Search apps" spellcheck="false" autocomplete="off" enterkeyhint="go" aria-controls="apps-list"></label>
+    <div class="app-list" id="apps-list" role="listbox" aria-labelledby="apps-title"></div>
+    <p class="hint note" id="apps-hint"></p>
+  </div>
+</div>
+
+<!-- The account in use is low on data: another one, or add one -->
+<div class="modal backdrop" id="low-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-user"/></svg></div>
+    <h2>Data is running low</h2>
+    <p id="low-why"></p>
+    <div class="accounts" id="low-accounts"></div>
+    <div class="actions">
+      <button class="btn" type="button" id="low-later">Later</button>
+      <button class="btn primary" type="button" id="low-add"><svg class="i"><use href="#i-plus"/></svg>Add account</button>
+    </div>
+  </div>
+</div>
+
+<!-- An account signed in to: added, or already on the list (said so) -->
+<div class="modal backdrop" id="notice-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-user"/></svg></div>
+    <h2 id="notice-title"></h2>
+    <p id="notice-text"></p>
+    <div class="actions"><button class="btn primary" type="button" id="notice-ok">OK</button></div>
+  </div>
+</div>
+
+<!-- A relay just turned on (set up, sent from another device, imported): first, whether it works (controller.js #testRelay, app.js renderRelayTest) -->
+<div class="modal backdrop" id="relaytest-modal" role="dialog" aria-modal="true" aria-labelledby="relaytest-title">
+  <div class="box glass">
+    <div class="lock-orb relay"><svg class="i"><use href="#i-relay"/></svg></div>
+    <h2 id="relaytest-title"></h2>
+    <p id="relaytest-from"></p>
+    <ul class="relay-steps" id="relaytest-steps"></ul>
+    <p id="relaytest-text"></p>
+    <div class="actions">
+      <button class="btn" type="button" id="relaytest-again"><svg class="i"><use href="#i-refresh"/></svg>Check again</button>
+      <button class="btn primary" type="button" id="relaytest-ok">Done</button>
+      <button class="btn desktop-only" type="button" id="relaytest-update"><svg class="i"><use href="#i-spark"/></svg>Update the script</button>
+    </div>
+  </div>
+</div>
+
+<!-- Connect with no internet (controller.js #wait): said so, and it connects by itself once the internet's back (app.js renderOffline) -->
+<div class="modal backdrop" id="offline-modal" role="alertdialog" aria-modal="true" aria-labelledby="offline-title" aria-describedby="offline-why">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-wifi-off"/></svg></div>
+    <h2 id="offline-title">You're offline</h2>
+    <p id="offline-why"></p>
+    <div class="waiting" aria-live="polite"><span class="spin"></span><span id="offline-note"></span></div>
+    <div class="actions">
+      <button class="btn" type="button" id="offline-cancel">Cancel</button>
+      <button class="btn primary" type="button" id="offline-retry"><svg class="i"><use href="#i-refresh"/></svg><span>Try again</span></button>
+    </div>
+    <span class="link fine" id="offline-anyway">Connect anyway</span>
+  </div>
+</div>
+
+<!-- The account in use hasn't turned on Firefox's VPN (Mozilla answers 403): how to, in Firefox -->
+<div class="modal backdrop" id="unentitled-modal">
+  <div class="box glass">
+    <h2>Turn on Firefox's VPN</h2>
+    <p data-t><b id="unentitled-email"></b> can't use the VPN yet. It's free, but each account turns it on once, in Firefox signed in to it: click the <b>VPN</b> button in Firefox's toolbar, then <b>Get started</b>.</p>
+    <img class="howto" src="img/firefox-vpn.png" alt="Firefox's VPN panel, opened from the VPN button at the toolbar's right, with its Get started button">
+    <div class="actions">
+      <button class="btn" type="button" id="unentitled-close">Close</button>
+      <button class="btn primary" type="button" id="unentitled-check"><svg class="i"><use href="#i-check"/></svg>Check again</button>
+    </div>
+  </div>
+</div>
+
+<!-- A TV (Android TV) signs in from a phone or computer on its network; a phone or computer too, by "Sign in from another device": its QR code and code (app.js tvPanel) -->
+<div class="modal backdrop" id="tvwait-modal">
+  <div class="box glass wide">
+    <h2 id="tvwait-title">Add a Mozilla account</h2>
+    <div id="tvwait-body"></div>
+    <span class="link fine" id="tvwait-close">Cancel</span>
+  </div>
+</div>
+
+<!-- A TV or phone gets its VPN relay from a computer or phone that has one (a relay is made on a computer): its QR code and code (app.js relayPanel) -->
+<div class="modal backdrop" id="relaywait-modal">
+  <div class="box glass wide">
+    <div class="lock-orb relay"><svg class="i"><use href="#i-relay"/></svg></div>
+    <h2>Get your VPN relay</h2>
+    <div id="relaywait-body"></div>
+    <span class="link fine" id="relaywait-close">Cancel</span>
+  </div>
+</div>
+
+<!-- A phone, computer or TV signs in a TV, phone or computer on its network (or sends a TV or phone its relay): the QR code scanned, or the code typed -->
+<div class="modal backdrop" id="tvsend-modal">
+  <div class="box glass">
+    <div class="lock-orb" id="tvsend-orb"><svg class="i"><use href="#i-tv"/></svg></div>
+    <h2 id="tvsend-title">Sign in a TV or phone</h2>
+    <p id="tvsend-intro"></p>
+    <div class="tv-nets">
+      <div class="tv-net"><svg class="i"><use href="#i-wifi"/></svg><span id="tvsend-net"></span></div>
+      <div class="tv-net" id="tvsend-found"></div>
+    </div>
+    <label class="tv-acct" id="tvsend-acct-wrap">Account to sign in with <select id="tvsend-acct"></select></label>
+    <div class="row-line" id="tvsend-relay-wrap" hidden>
+      <div><div class="label"><svg class="i"><use href="#i-relay"/></svg>My VPN relay too</div><div class="hint">Where Mozilla is blocked or refuses your country, the other device needs it to connect.</div></div>
+      <button class="switch on" type="button" id="tvsend-relay" role="switch" aria-checked="true" aria-label="My VPN relay too"></button>
+    </div>
+    <div class="tv-cam" id="tvsend-cam" hidden><video id="tvsend-video" muted playsinline></video><i></i></div>
+    <form class="tv-code-form" id="tvsend-form">
+      <input id="tvsend-code" placeholder="ABC 234" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="The code on the other screen">
+      <button class="btn primary" type="submit"><svg class="i"><use href="#i-check"/></svg><span id="tvsend-go">Sign in</span></button>
+    </form>
+    <button class="btn" type="button" id="tvsend-scan" hidden><svg class="i"><use href="#i-camera"/></svg>Scan the QR code</button>
+    <div class="note" id="tvsend-note"></div>
+    <span class="link fine" id="tvsend-close">Close</span>
+  </div>
+</div>
+
+<!-- Sharing Zeno (share.ts): its page's QR code on the local network, with the app and the settings, or the settings' link -->
+<div class="modal backdrop" id="give-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-share"/></svg></div>
+    <h2>Share Zeno</h2>
+    <div id="give-body"></div>
+    <span class="link fine" id="give-close">Close</span>
+  </div>
+</div>
+
+<!-- Shared settings to import: a link pasted, or the one Android opened Zeno with; what it changes, then Import -->
+<div class="modal backdrop" id="take-modal">
+  <form class="box glass" id="take-form">
+    <div class="lock-orb"><svg class="i"><use href="#i-share"/></svg></div>
+    <h2>Import settings</h2>
+    <p data-t>Paste a Zeno settings link (<span class="mono">zeno://settings…</span>), from someone you trust.</p>
+    <textarea id="take-link" rows="3" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="The settings link"></textarea>
+    <ul class="give-what" id="take-what"></ul>
+    <div class="note" id="take-note"></div>
+    <div class="actions">
+      <button class="btn" type="button" id="take-close">Cancel</button>
+      <button class="btn primary" type="submit" id="take-go" disabled><svg class="i"><use href="#i-check"/></svg>Import</button>
+    </div>
+  </form>
+</div>
+
+<!-- The Wi-Fi's name, which the system shows only to apps allowed Location: why, before the system asks (app.js askWifi) -->
+<div class="modal backdrop" id="wifi-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-wifi"/></svg></div>
+    <h2>Show your Wi-Fi's name?</h2>
+    <p id="wifi-why"></p>
+    <p>Zeno reads only the name, to show it here, so you can see which network you're on. It never reads where you are, and the name stays on this device.</p>
+    <p id="wifi-how"></p>
+    <div class="note" id="wifi-note"></div>
+    <div class="actions">
+      <button class="btn" type="button" id="wifi-later">Not now</button>
+      <button class="btn primary" type="button" id="wifi-ok">Continue</button>
+    </div>
+  </div>
+</div>
+
+<!-- Signing out of an account (or stopping using Firefox's sign-in): asked first -->
+<div class="modal backdrop" id="logout-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-logout"/></svg></div>
+    <h2 id="logout-title"></h2>
+    <p id="logout-why"></p>
+    <div class="actions">
+      <button class="btn" type="button" id="logout-cancel">Cancel</button>
+      <button class="btn primary" type="button" id="logout-ok" data-act="removeAccount"><svg class="i"><use href="#i-logout"/></svg><span id="logout-label"></span></button>
+    </div>
+  </div>
+</div>
+
+<!-- The update didn't go in by itself: the downloaded file, to install by hand -->
+<div class="modal backdrop" id="manual-modal">
+  <div class="box glass">
+    <div class="lock-orb"><svg class="i"><use href="#i-up"/></svg></div>
+    <h2>Install the update yourself</h2>
+    <p id="manual-why"></p>
+    <ol class="steps" id="manual-steps"></ol>
+    <div class="actions">
+      <button class="btn" type="button" id="manual-show">Show in folder</button>
+      <button class="btn primary" type="button" id="manual-install">Quit & install</button>
+    </div>
+    <span class="link fine" id="manual-later">Later</span>
+  </div>
+</div>
+
+<!-- The relay's setup, step by step (relaysetup.ts has the wording and the script) -->
+<div class="modal wizard" id="wizard" aria-label="Set up the VPN relay">
+  <div class="box glass">
+    <header>
+      <span class="badge"><svg class="i"><use href="#i-shield"/></svg></span>
+      <div><h2>Set up the VPN relay</h2><p>A few minutes, free, on your own Google account.</p></div>
+      <button class="icon-btn" type="button" id="wz-close" title="Close"><svg class="i"><use href="#i-close"/></svg></button>
+    </header>
+    <ol class="wz-stepper" id="wz-stepper"></ol>
+    <div class="wz-body" id="wz-body"></div>
+    <div class="note" id="wz-note" data-tone="error"></div>
+    <div class="actions"><button class="btn" type="button" id="wz-prev">Previous</button><button class="btn primary" type="button" id="wz-next">Next</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="onboard">
+  <div class="box glass" id="onboard-box"></div>
+</div>
+
+<div class="overlay" id="restoring">
+  <div class="box glass">
+    <div class="fox-spin"><span class="orbit"></span><svg class="fox-hero"><use href="#fox"/></svg></div>
+    <h2>Restoring networking…</h2>
+    <p>The fox is putting your routes and DNS back exactly where it found them.</p>
+    <p class="warn">Please don't force quit: a half-tidied den means no internet until you reboot.</p>
+    <p class="fine">Just a moment, then Zeno closes by itself.</p>
+  </div>
+</div>
+
+</body>
+</html>

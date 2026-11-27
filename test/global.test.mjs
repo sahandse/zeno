@@ -1,0 +1,161 @@
+// Pure-function checks for the global-routing planner. No root, no network.
+import assert from "node:assert";
+import { parseDefaultRoute, isVpnDev, planSetup, planTeardown, planStaleCleanup, staleCleanupScript, planDirect, planDirectTeardown, conflictingVpn, vpnAppsIn, OtherVpnError, needsRepin, pinCmd, dialHost } from "../dist/global.js";
+import { Connection } from "../dist/connection.js";
+
+// Real-world `ip route` with a DHCP default plus extra routes.
+const r1 = parseDefaultRoute(
+  "default via 192.168.0.1 dev wlo1 proto dhcp src 192.168.0.103 metric 600\n" +
+    "10.0.0.0/8 dev eth0 scope link",
+);
+assert.deepEqual(r1, { gw: "192.168.0.1", dev: "wlo1" }, "default via gw");
+
+// Point-to-point default with no gateway.
+assert.deepEqual(parseDefaultRoute("default dev ppp0\n"), { gw: null, dev: "ppp0" }, "default no gw");
+
+// No default route at all.
+assert.equal(parseDefaultRoute("10.0.0.0/8 dev eth0\n"), null, "no default");
+
+assert.ok(isVpnDev("tun0") && isVpnDev("wg0") && isVpnDev("proton0"), "vpn devs flagged");
+assert.ok(!isVpnDev("wlo1") && !isVpnDev("eth0"), "real devs not flagged");
+
+// Setup pins every bypass IP (VPN server + DNS resolvers) via the real uplink,
+// then routes the default through the tun.
+const setup = planSetup(["151.101.1.1", "8.8.8.8"], { gw: "192.168.0.1", dev: "wlo1" });
+assert.deepEqual(
+  setup.find((c) => c[3] === "151.101.1.1"),
+  ["ip", "route", "replace", "151.101.1.1", "via", "192.168.0.1", "dev", "wlo1"],
+  "server IP pinned via real gateway (replace: a leftover pin can't fail it)",
+);
+assert.deepEqual(
+  setup.find((c) => c[3] === "8.8.8.8"),
+  ["ip", "route", "replace", "8.8.8.8", "via", "192.168.0.1", "dev", "wlo1"],
+  "DNS resolver pinned via real gateway",
+);
+assert.ok(
+  setup.some((c) => c.join(" ") === "ip route add default dev zeno0 metric 1"),
+  "default routed through tun",
+);
+
+// Gateway-less uplink pins bypass IPs by device only.
+const setupNoGw = planSetup(["151.101.1.1"], { gw: null, dev: "ppp0" });
+assert.deepEqual(
+  setupNoGw.find((c) => c[3] === "151.101.1.1"),
+  ["ip", "route", "replace", "151.101.1.1", "dev", "ppp0"],
+  "server IP pinned by device",
+);
+
+// IPv6 is blackholed so apps can't leak around the v4-only tunnel.
+assert.ok(
+  setup.some((c) => c.join(" ") === "ip -6 route replace blackhole default metric 1"),
+  "IPv6 blackholed on setup",
+);
+
+// The tun comes from tun2socks (gone with it, routes and all), never `ip tuntap add` (it would outlive a crash).
+assert.ok(!setup.some((c) => c.includes("tuntap")), "setup doesn't create the tun");
+assert.ok(planTeardown([]).some((c) => c.join(" ") === "ip link del zeno0"), "teardown removes a leftover tun");
+// A killed session's leftovers, cleared before a new one and by `zeno restore`; pkill can't match its own sudo.
+const stale = planStaleCleanup().map((c) => c.join(" "));
+assert.ok(stale.includes("pkill -f -- --device zeno[0]") && !"sudo -S -p  pkill -f -- --device zeno[0]".match(/--device zeno[0]/), "pkill spares its sudo");
+// Split tunneling's direct sites: dialed from the uplink's address, which skips main's default routes (the tun's)
+assert.deepEqual(planDirect("192.168.0.23", { gw: "192.168.0.1", dev: "wlo1" }).map((c) => c.join(" ")), [
+  "ip route replace default via 192.168.0.1 dev wlo1 table 1080",
+  "ip rule add from 192.168.0.23 lookup main suppress_prefixlength 0 priority 1080",
+  "ip rule add from 192.168.0.23 lookup 1080 priority 1081",
+]);
+assert.equal(planDirect("10.0.0.5", { gw: null, dev: "ppp0" })[0].join(" "), "ip route replace default dev ppp0 table 1080", "no gateway");
+for (const step of planDirectTeardown().map((c) => c.join(" "))) assert.ok(stale.includes(step), `a killed session's ${step} is cleaned too`);
+const script = staleCleanupScript({ gw: "192.168.0.1", dev: "wlo1" });
+assert.ok(script.startsWith("'pkill' '-f' '--' '--device zeno[0]' 2>/dev/null; ") && script.endsWith("; true"), script);
+assert.ok(stale.includes("ip link del zeno0") && stale.includes("ip -6 route del blackhole default metric 1"), "tun and IPv6 blackhole");
+assert.ok(stale.includes("iptables -D OUTPUT -o zeno0 -p udp -m multiport --dports 80,443 -j REJECT"), "QUIC reject rule");
+assert.ok(stale.includes("iptables -D OUTPUT -o zeno0 -p udp -j REJECT"), "and 1.1.0's all-UDP one");
+const stalePins = planStaleCleanup({ gw: "192.168.0.1", dev: "wlo1" }).map((c) => c.join(" "));
+assert.ok(stalePins.includes("ip route del 10.0.0.0/8 via 192.168.0.1 dev wlo1 proto boot metric 0"), "private pins, only as zeno adds them");
+assert.ok(!stale.some((c) => c.startsWith("ip route del 10.")), "no uplink known: private routes left alone");
+
+// Teardown removes the default, every pin, and the IPv6 blackhole.
+const teardown = planTeardown(["151.101.1.1", "8.8.8.8"]);
+assert.ok(teardown.some((c) => c.join(" ") === "ip route del default dev zeno0 metric 1"), "default removed");
+assert.ok(teardown.some((c) => c.join(" ") === "ip route del 151.101.1.1"), "server pin removed");
+assert.ok(teardown.some((c) => c.join(" ") === "ip route del 8.8.8.8"), "DNS pin removed");
+assert.ok(teardown.some((c) => c.join(" ") === "ip -6 route del blackhole default metric 1"), "IPv6 restored");
+
+// A VPN on the default device, or 0/1 split routes, is detected as conflicting: its device.
+const wlo1 = { gw: "192.168.0.1", dev: "wlo1" };
+assert.equal(conflictingVpn("default via 192.168.0.1 dev wlo1\n", wlo1), null, "plain uplink is fine");
+assert.equal(conflictingVpn("default via 10.0.0.1 dev tun0\n", { gw: "10.0.0.1", dev: "tun0" }), "tun0", "vpn dev conflicts");
+assert.equal(
+  conflictingVpn("0.0.0.0/1 via 10.136.12.1 dev tun0\ndefault via 192.168.0.1 dev wlo1\n", wlo1),
+  "tun0",
+  "0/1 split route conflicts even when default looks normal",
+);
+// Windscribe connected (Stealth over OpenVPN), as `ip route` has it: its routes beat the tun's default
+const windscribe = [
+  "0.0.0.0/1 via 10.146.52.1 dev tun0 ",
+  "default via 192.168.0.1 dev wlo1 proto dhcp src 192.168.0.103 metric 20600 ",
+  "10.146.52.0/22 dev tun0 proto kernel scope link src 10.146.52.6 ",
+  "128.0.0.0/1 via 10.146.52.1 dev tun0 ",
+  "152.233.50.147 via 192.168.0.1 dev wlo1 metric 200 ",
+].join("\n");
+assert.deepEqual(parseDefaultRoute(windscribe, "zeno0"), wlo1);
+assert.equal(conflictingVpn(windscribe, wlo1), "tun0");
+// Which app: its device's name, else a process only its tunnel runs (ps cuts names to 15 letters); an app's always-on
+// parts (Windscribe's window and helper, Clash Verge's service) say nothing
+const ps = ["systemd", "helper", "Windscribe", "windscribewstun", "windscribeopenv", "clash-verge-ser", "zsh"];
+assert.deepEqual(vpnAppsIn("tun0", ps), ["Windscribe"]);
+assert.deepEqual(vpnAppsIn("tun0", ["helper", "Windscribe", "clash-verge-ser", "verge-mihomo"]), [], "Windscribe off, Clash a proxy: none named");
+assert.deepEqual(vpnAppsIn("Mihomo", ps), ["Clash"], "Clash Verge's TUN mode, by its device");
+assert.deepEqual(vpnAppsIn("wg0-mullvad", []), ["Mullvad VPN"]);
+assert.deepEqual(vpnAppsIn("nordlynx", []), ["NordVPN"]);
+assert.deepEqual(vpnAppsIn("wg0", []), ["WireGuard"]);
+assert.deepEqual(vpnAppsIn("tun0", ["/usr/bin/openvpn", "openconnect"]), ["OpenVPN", "OpenConnect"]);
+assert.deepEqual(vpnAppsIn("Windscribe IKEv2", []), ["Windscribe"], "Windows's adapter");
+assert.deepEqual(vpnAppsIn("tun0", ["C:\\Program Files\\OpenVPN\\bin\\openvpn.exe"]), ["OpenVPN"]);
+assert.deepEqual(vpnAppsIn("tun0", ["/Applications/Windscribe.app/Contents/Helpers/windscribeopenvpn"]), ["Windscribe"], "not OpenVPN too");
+// what it says
+const said = (dev, apps) => new OtherVpnError(dev, apps).message.replace(/ and takes all the traffic: .*/, "");
+assert.equal(new OtherVpnError("tun0", ["Windscribe"]).message, "Another VPN is on (Windscribe, on tun0) and takes all the traffic: turn it off for whole-system mode; the proxy works alongside it");
+assert.equal(said("tun0", []), "Another VPN is on (on tun0)");
+assert.equal(said("0/1 split routes", ["OpenVPN"]), "Another VPN is on (OpenVPN)");
+assert.equal(said("0/1 split routes", []), "Another VPN is on (0/1 split routes)");
+assert.equal(said("tun0", ["OpenVPN", "OpenConnect"]), "Another VPN is on (OpenVPN or OpenConnect, on tun0)");
+
+// After a Wi-Fi change: find the real uplink past our own tun default (metric 1, listed first).
+assert.deepEqual(
+  parseDefaultRoute("default dev zeno0 metric 1\ndefault via 10.0.0.1 dev wlo1 proto dhcp metric 600\n", "zeno0"),
+  { gw: "10.0.0.1", dev: "wlo1" },
+  "tun default skipped",
+);
+assert.equal(parseDefaultRoute("default dev zeno0 metric 1\n", "zeno0"), null, "only the tun: network down");
+
+// Re-pin when the uplink moved, the server routes into the tun, or DNS was reset.
+const okRoute = "151.101.1.1 via 192.168.0.1 dev wlo1 src 192.168.0.103 uid 1000\n    cache";
+const tunRoute = "151.101.1.1 dev zeno0 src 198.18.0.1 uid 1000\n    cache";
+const ourDns = "Link 7 (zeno0): 198.18.0.1:41234"; // set on our tun, never on the uplink; on the tun's own address
+assert.equal(needsRepin(wlo1, wlo1, okRoute, ourDns, 41234), false, "nothing changed");
+assert.equal(needsRepin(wlo1, wlo1, okRoute, null, 0), false, "nothing changed, direct DNS");
+assert.equal(needsRepin(wlo1, { gw: "10.0.0.1", dev: "wlo1" }, okRoute, ourDns, 41234), true, "new gateway, same device");
+assert.equal(needsRepin(wlo1, { gw: "192.168.0.1", dev: "eth0" }, okRoute, ourDns, 41234), true, "new device");
+assert.equal(needsRepin(wlo1, wlo1, tunRoute, ourDns, 41234), true, "pin deleted: server goes into the tun");
+assert.equal(needsRepin(wlo1, wlo1, okRoute, "Link 7 (zeno0):", 41234), true, "our tun's DNS was reset");
+assert.equal(needsRepin(wlo1, wlo1, okRoute, ourDns, 4123), true, "another port isn't ours, even as a prefix");
+assert.equal(needsRepin(wlo1, wlo1, okRoute, "Link 7 (zeno0): 127.0.0.1:41234", 41234), true, "loopback isn't ours: resolved < 250 can't reach it there");
+assert.equal(dialHost("0.0.0.0"), "127.0.0.1", "listen-on-all is dialed on loopback");
+assert.equal(dialHost("127.0.0.1"), "127.0.0.1");
+assert.deepEqual(pinCmd("10.0.0.0/8", wlo1), ["ip", "route", "add", "10.0.0.0/8", "via", "192.168.0.1", "dev", "wlo1"]);
+
+// Switching country with global on: the proxy keeps the old server until the new one's IP
+// is pinned (else its dial loops through the tunnel), and a failed pin keeps the old one.
+const conn = new Connection({ getAccessToken: async () => "token" });
+const country = (code, hostname) => ({ code, name: code, locked: false, available: true, servers: [{ hostname, port: 443, quarantined: false }] });
+await conn.selectServer(country("DE", "de.example"));
+await conn.selectServer(country("FR", "fr.example"), async (s) => {
+  assert.equal(conn.server.hostname, "de.example", "old server in use while the new one is pinned");
+  s.ip = "192.0.2.7";
+});
+assert.deepEqual([conn.server.hostname, conn.server.ip], ["fr.example", "192.0.2.7"], "then the pinned new server");
+await assert.rejects(conn.selectServer(country("NL", "nl.example"), async () => { throw new Error("pin failed"); }));
+assert.equal(conn.server.hostname, "fr.example", "a failed pin keeps the current server");
+
+console.log("ok - global routing planner builds correct ip command sequences");

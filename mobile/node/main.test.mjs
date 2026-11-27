@@ -1,0 +1,244 @@
+// node mobile/node/main.test.mjs (after `npm run build` at the top): the notification's Pause and Resume in main.mjs,
+// and its fetch() where there's no WebAssembly (iOS), run as the app runs it (a socket on fd 3; no JIT, as on iOS), the
+// app's side played here, the Controller a stand-in (no account needed).
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { copyFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const dir = mkdtempSync(join(tmpdir(), "zeno-core-"));
+copyFileSync(join(here, "main.mjs"), join(dir, "main.mjs")); // a copy: its imports resolve beside it
+for (const f of ["fa.js", "ru.js"]) copyFileSync(join(here, "../../gui/renderer", f), join(dir, f)); // as prepare.mjs has them
+symlinkSync(join(here, "../../dist"), join(dir, "dist"));
+writeFileSync(join(dir, "package.json"), '{ "type": "module" }');
+writeFileSync(join(dir, "updater.js"), "export class Updater { start() {} state() { return null; } }");
+// gui/controller.js as main.mjs uses it: each step takes a moment, whole-system mode through main.mjs's globalSession
+writeFileSync(join(dir, "controller.js"), `
+import { EventEmitter } from "node:events";
+const moment = () => new Promise((r) => setTimeout(r, 80));
+export class Controller extends EventEmitter {
+  #android; #active = null; #global = null; #busy = false; #connecting = null; #auth = { stage: "choose" }; #signed = [];
+  constructor({ android }) { super(); this.#android = android; }
+  addAccount(how) { if (how === "mozilla") this.#android.openSignIn(); }
+  // the sign-in page's session: in use, and signed in with a moment later
+  signedIn({ email }) {
+    this.#signed.push(email); this.#auth = { stage: "checking" }; this.#changed();
+    void moment().then(() => ((this.#auth = { stage: "ready" }), this.#changed()));
+  }
+  async start() {}
+  updateWays() { return [{ via: "direct" }]; }
+  reloadList(url, method) { return fetch(url, { method, body: method === "POST" ? "hi" : undefined }).then((r) => r.text()); }
+  openSettings() {}
+  #changed() { this.emit("change"); }
+  // the stand-in's way into main.mjs's hooks for controller.js (#joined: a network's rule), e.g. "pause:Wi-Fi · Home"
+  checkSite(what) { const [hook, arg] = what.split(":"); return this.#android[hook](arg); }
+  async connect(code = "DE") { // the location selected
+    if (this.#busy) return;
+    this.#busy = true; this.#connecting = code; this.#changed();
+    await moment();
+    this.#active = code; this.#busy = false; this.#connecting = null; this.#changed();
+  }
+  async disconnect() {
+    if (this.#busy) return;
+    if (this.#global) await this.#globalOff();
+    if (!this.#active) return;
+    await moment(); // the proxy closing
+    this.#active = null; this.#changed();
+  }
+  async toggleGlobal() {
+    if (this.#busy) return;
+    if (this.#global) return this.#globalOff();
+    this.#busy = true; this.#changed();
+    const session = this.#android.globalSession({ proxyPort: 1080 });
+    await session.start();
+    this.#global = session; this.#busy = false; this.#changed();
+  }
+  async #globalOff() {
+    this.#busy = true; this.#changed();
+    const session = this.#global;
+    this.#global = null;
+    await session.stop();
+    this.#busy = false; this.#changed();
+  }
+  state() {
+    return { auth: this.#auth, signed: this.#signed, active: this.#active, global: this.#global ? this.#active : null, globalOn: !!this.#global, busy: this.#busy, connecting: this.#connecting,
+      relayOn: false, proxy: this.#active ? { addr: "127.0.0.1:1080" } : null, countries: [{ code: "DE", name: "Germany" }, { code: "US", name: "United States" }] };
+  }
+}`);
+
+const core = spawn(process.execPath, ["--jitless", "main.mjs", "3"], { cwd: dir, env: { ...process.env, HOME: dir }, stdio: ["ignore", "inherit", "inherit", "pipe"] });
+const app = core.stdio[3];
+const out = (m) => app.write(`${JSON.stringify(m)}\n`);
+const notes = []; // what the notification said, in order: its title (" [Resume]" when paused), or "off"
+const texts = []; // and its text
+const vpn = []; // Android's VPN asked up and down
+const disguises = []; // disguise mode's codes, as the app was told them (Disguise.kt)
+const pages = []; // the sign-in page (App.tsx), as the app was told to show it (true) or put it away (false)
+const replies = new Map();
+let buf = "";
+app.setEncoding("utf8");
+app.on("data", (chunk) => {
+  buf += chunk;
+  for (let i; (i = buf.indexOf("\n")) >= 0; ) {
+    const m = JSON.parse(buf.slice(0, i));
+    buf = buf.slice(i + 1);
+    if (m.t === "reply") replies.get(m.id)?.(m.v);
+    if (m.t === "signIn") pages.push(m.open !== false);
+    if (m.t !== "ask") continue;
+    if (m.cmd === "keepAlive") notes.push(m.args.off ? "off" : `${m.args.title}${m.args.paused ? " [Resume]" : ""}`), texts.push(m.args.text ?? "");
+    if (m.cmd === "vpnStart" || m.cmd === "vpnStop") vpn.push(m.cmd);
+    if (m.cmd === "disguise") disguises.push(m.args.code);
+    out({ t: "answer", id: m.id, v: null });
+  }
+});
+let seq = 0;
+/** A window's action, as the app passes it on; resolves with its answer once done. */
+const act = (name, ...args) => new Promise((resolve) => (replies.set(++seq, resolve), out({ t: "act", id: seq, name, args })));
+const settle = () => new Promise((r) => setTimeout(r, 500)); // the notification follows the state within 50 ms
+
+try {
+  // fetch() without WebAssembly: redirects as fetch() follows them (a POST's 302 to a GET, a 307 kept a POST)
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d)).on("end", () => {
+      if (req.url === "/302" || req.url === "/307") return res.writeHead(Number(req.url.slice(1)), { location: "/to" }).end();
+      res.end(`${req.method} ${req.url} ${body}`);
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const at = `http://127.0.0.1:${server.address().port}`;
+  assert.equal(await act("reloadList", `${at}/302`, "POST"), "GET /to ");
+  assert.equal(await act("reloadList", `${at}/307`, "POST"), "POST /to hi");
+  server.close();
+
+  await act("connect", "DE");
+  await act("toggleGlobal");
+  await settle();
+  assert.equal(notes.at(-1), "Whole system · Germany");
+
+  // Pause: Android's VPN down, the notification straight to Paused: never gone, or its icon would go with it
+  let from = notes.length;
+  out({ t: "pause" });
+  await settle();
+  assert.deepEqual(vpn, ["vpnStart", "vpnStop"]);
+  assert.ok(!notes.slice(from).includes("off"), `the notification went away: ${notes.slice(from)}`);
+  assert.equal(notes.at(-1), "Paused · Germany [Resume]");
+
+  // Resume: as it was, whole-system mode too
+  from = notes.length;
+  out({ t: "resume" });
+  await settle();
+  assert.ok(notes.slice(from).includes("Connecting… · Germany [Resume]"));
+  assert.ok(!notes.slice(from).includes("off"));
+  assert.deepEqual(vpn, ["vpnStart", "vpnStop", "vpnStart"]);
+  assert.equal(notes.at(-1), "Whole system · Germany");
+
+  // Paused, the app's power button resumes as the notification's Resume does, whole-system mode too; meanwhile the
+  // window's state says paused
+  out({ t: "pause" });
+  await settle();
+  assert.deepEqual((await act("state")).paused, { code: "DE", global: true });
+  await act("power");
+  await settle();
+  assert.equal(notes.at(-1), "Whole system · Germany");
+  assert.equal(vpn.at(-1), "vpnStart");
+  assert.equal((await act("state")).paused, null);
+
+  // ...and so does a country picked while paused: there
+  out({ t: "pause" });
+  await settle();
+  await act("connect", "US");
+  await settle();
+  assert.equal(notes.at(-1), "Whole system · United States");
+
+  // Disconnect while paused: the notification goes
+  out({ t: "pause" });
+  await settle();
+  assert.equal(notes.at(-1), "Paused · United States [Resume]");
+  out({ t: "disconnect" });
+  await settle();
+  assert.equal(notes.at(-1), "off");
+
+  // The mode picked while off: only remembered, nothing connects
+  from = notes.length;
+  await act("toggleGlobal");
+  await settle();
+  assert.equal((await act("state")).active, null);
+  assert.equal((await act("state")).wantGlobal, false);
+  assert.equal(notes.length, from);
+
+  // Paused in proxy-only mode, resumed in the app, then disconnected there: Paused doesn't come back
+  await act("connect", "DE");
+  out({ t: "pause" });
+  await settle();
+  assert.equal(notes.at(-1), "Paused · Germany [Resume]");
+  await act("power");
+  await settle();
+  assert.equal(notes.at(-1), "Proxy · Germany");
+  await act("disconnect");
+  await settle();
+  assert.equal(notes.at(-1), "off");
+
+  // Quick Settings' tile (ZenoTile.kt): connects as the power button does, in the mode last picked (proxy only now)
+  out({ t: "tile" });
+  await settle();
+  assert.equal(notes.at(-1), "Proxy · Germany");
+  // a network's rule pauses as the notification's Pause does, saying where; leaving it (or the tile) resumes
+  await act("checkSite", "pause:Wi-Fi · Home");
+  await settle();
+  assert.equal(notes.at(-1), "Paused · Germany [Resume]");
+  assert.equal(texts.at(-1), "On Wi-Fi · Home: back on when you leave it");
+  assert.equal(await act("checkSite", "netPaused"), true);
+  out({ t: "tile" });
+  await settle();
+  assert.equal(notes.at(-1), "Proxy · Germany");
+  assert.equal(await act("checkSite", "netPaused"), false);
+  out({ t: "disconnect" });
+  await settle();
+  assert.equal(notes.at(-1), "off");
+
+  // Settings → Look like a calculator: the app is told the code, and the window's state has it; null, Zeno again
+  assert.equal(await act("disguise", "2580"), true);
+  assert.equal((await act("state")).disguise, "2580");
+  await act("disguise", null);
+  assert.deepEqual(disguises, ["2580", null]);
+  assert.equal((await act("state")).disguise, null);
+
+  // The sign-in page (App.tsx), opened by the window's Add account: what it hands over confirmed as the password's in
+  // is signed in with, and the page put away once it is; its last step after that signs in nothing more
+  await act("addAccount", "mozilla");
+  await settle();
+  assert.deepEqual(pages, [true]);
+  out({ t: "signedIn", account: { uid: "u1", email: "me@example.com", sessionToken: "ab".repeat(32), verified: true } });
+  await settle();
+  assert.deepEqual((await act("state")).signed, ["me@example.com"]);
+  assert.deepEqual(pages, [true, false], "put away once it's signed in with");
+  out({ t: "signInDone" });
+  await settle();
+  assert.deepEqual((await act("state")).signed, ["me@example.com"], "not twice");
+  // another, with a code from the email to type: the page stays though it's signed in already (with the one
+  // before), and its last step signs it in
+  await act("addAccount", "mozilla");
+  out({ t: "signedIn", account: { uid: "u2", email: "two@example.com", sessionToken: "cd".repeat(32), verified: false } });
+  await settle();
+  assert.deepEqual((await act("state")).signed, ["me@example.com"], "not before its code's in");
+  assert.deepEqual(pages, [true, false, true], "the page stays for its code");
+  out({ t: "signInDone" });
+  await settle();
+  assert.deepEqual((await act("state")).signed, ["me@example.com", "two@example.com"]);
+  assert.deepEqual(pages, [true, false, true, false]);
+  // closed before it handed anything over: nothing's signed in
+  await act("addAccount", "mozilla");
+  out({ t: "signInClosed" });
+  await settle();
+  assert.deepEqual((await act("state")).signed, ["me@example.com", "two@example.com"]);
+  assert.deepEqual(pages, [true, false, true, false, true]);
+  console.log("main.mjs: fetch() without WebAssembly, Pause and Resume, the tile, a network's pause, disguise mode and the sign-in page ok");
+} finally {
+  core.kill();
+  rmSync(dir, { recursive: true, force: true });
+}

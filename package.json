@@ -1,0 +1,67 @@
+{
+  "name": "@sahandse/zeno-vpn",
+  "version": "1.0.0",
+  "description": "Free system-wide VPN for Linux, macOS and Windows using Firefox's built-in VPN (IP Protection): SOCKS5/HTTP proxy + TUN routing, in a terminal UI (unofficial)",
+  "homepage": "https://github.com/sahandse/ZENO#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sahandse/ZENO.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sahandse/ZENO/issues"
+  },
+  "type": "module",
+  "bin": {
+    "zeno": "dist/cli.js",
+    "zeno-vpn": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "AUTH.md"
+  ],
+  "scripts": {
+    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc && node -e \"fs.chmodSync('dist/cli.js', 0o755); fs.cpSync('assets', 'dist/assets', { recursive: true })\"",
+    "test": "npm run build && node test/global.test.mjs && node test/helper.test.mjs && node test/proxy.test.mjs && node test/vpncheck.test.mjs && node test/udp.test.mjs && node test/dns.test.mjs && node test/update.test.mjs && node test/ways.test.mjs && node test/darwin.test.mjs && node test/win32.test.mjs && node test/auth.test.mjs && node test/tokenserver.test.mjs && node test/guardian.test.mjs && node test/netinfo.test.mjs && node test/settings.test.mjs && node test/split.test.mjs && node test/blocker.test.mjs && node test/youtube.test.mjs && node test/smart.test.mjs && node test/reach.test.mjs && node test/smartdns.test.mjs && node test/gateway.test.mjs && node test/share.test.mjs && node test/hot.test.mjs && node test/accounts.test.mjs && node test/restore.test.mjs && node test/profile.test.mjs && node test/ui.test.mjs && node test/httprelay.test.mjs && node test/relaysetup.test.mjs && node test/relaymode.test.mjs && node test/tvpair.test.mjs && node test/devicelogin.test.mjs && node test/fxalogin.test.mjs",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "keywords": [
+    "firefox",
+    "firefox-vpn",
+    "mozilla-vpn",
+    "vpn",
+    "free-vpn",
+    "ip-protection",
+    "mozilla",
+    "proxy",
+    "socks5",
+    "socks5-proxy",
+    "http-proxy",
+    "tun",
+    "tun2socks",
+    "system-wide-vpn",
+    "privacy",
+    "tui",
+    "cli",
+    "linux",
+    "macos",
+    "windows"
+  ],
+  "author": "Sahand Rezvan",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^7.0.2"
+  },
+  "contributors": [
+    "Dier Cohen (Foxhole upstream)"
+  ],
+  "private": true
+}

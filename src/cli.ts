@@ -1,0 +1,797 @@
+#!/usr/bin/env node
+import net from "node:net";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { fetchServerList } from "./serverlist.js";
+import { findAccount, openBrowser, FULL_DISK_ACCESS, type AccountState, type ProfileAccessError } from "./profile.js";
+import { FirefoxAuth, StaticAuth, type Authenticator, type FxaError } from "./auth.js";
+import { FIREFOX, authFor, loadAccounts, peekFirefox, saveAccounts, withFirefox, withOwn, without } from "./accounts.js";
+import { desktopApp, signInWindow } from "./fxalogin.js";
+import { deviceLogin } from "./devicelogin.js";
+import { Connection, findCountry } from "./connection.js";
+import { fetchEntitlement, useRelay, GuardianBlocked } from "./guardian.js";
+import { loadRelay } from "./httprelay.js";
+import { startProxy } from "./proxy.js";
+import { firewallHint, lanIp } from "./netinfo.js";
+import { useSplit, splitSummary, type Split } from "./split.js";
+import { useBlocker, blockerOf, refreshBlocker } from "./blocker.js";
+import { useYoutube } from "./youtube.js";
+import { runGlobal, directPriv, isPrivileged, dialHost, staleCleanupScript, parseDefaultRoute } from "./global.js";
+import { loadSettings, proxyHost, loginFor, type Settings } from "./settings.js";
+import { restoreWindows, serveElevated, HELPER_CMD } from "./global-win32.js";
+import { planMacRestore, parseRouteGet } from "./global-darwin.js";
+import { freePort } from "./restore.js";
+import { Tui } from "./tui.js";
+import { envLines, caTrusted } from "./catrust.js";
+import { loadCa } from "./mitm.js";
+import { useFastlyFallback } from "./dns.js";
+import { checkUpdate, updateNotice, versionLines } from "./update.js";
+import { hot, refreshHot } from "./hot.js";
+import { startTokenReceiver, loadSavedToken, saveToken, forgetToken, tokenFile, tokenTtl, tokenProblem } from "./tokenserver.js";
+import { bold, dim, green, red, yellow, cyan, under, code, flag, countryName, gb, shortDate, box, vw, centerIn, copyText, openUrl } from "./ui.js";
+
+// Node gives each server address only 250 ms before moving on; far VPN servers
+// take 600-900 ms to answer, so every attempt failed with a blank AggregateError.
+net.setDefaultAutoSelectFamilyAttemptTimeout(3000);
+useFastlyFallback(); // where the network drops Fastly's addresses Mozilla's hosts get (dns.ts)
+
+function arg(name: string): string | undefined {
+  const i = process.argv.indexOf(`--${name}`);
+  return i !== -1 ? process.argv[i + 1] : undefined;
+}
+
+const ENV_TOKEN = "ZENO_ACCESS_TOKEN";
+
+/** ensureAuth found Mozilla's account server blocked here (no relay set): the TUI says so as it opens. */
+let blockedAtStart: GuardianBlocked | null = null;
+
+/** The access token to use: the env var if set, else the one saved from Firefox. */
+function tokenEnv(): { name: string; value: string } | null {
+  const value = process.env[ENV_TOKEN];
+  if (value) return { name: ENV_TOKEN, value };
+  const saved = loadSavedToken();
+  return saved ? { name: "saved token", value: saved } : null;
+}
+
+/** Warns about a pasted access token that is expired or short-lived. */
+function noteTokenTtl(): void {
+  const env = tokenEnv();
+  if (!env) return;
+  const ttl = tokenTtl(env.value);
+  if (ttl === null) return;
+  if (ttl <= 0) {
+    console.log(red(`${env.name} has expired — fetch a fresh one (it can't be refreshed).`));
+  } else {
+    console.log(dim(`token valid for ${Math.floor(ttl / 60)}m ${ttl % 60}s (static tokens aren't refreshed)`));
+  }
+}
+
+/** Picks an authenticator: the env token if set, else the Firefox session, else the saved token. */
+function makeAuth(): Authenticator | null {
+  const env = tokenEnv();
+  if (env?.name === ENV_TOKEN) return new StaticAuth(env.value);
+  const a = loadAccounts();
+  if (a.current && a.current !== FIREFOX) return authFor(a, a.current);
+  if (!a.current) return null;
+  const account = findAccount();
+  if (account?.signedIn) return new FirefoxAuth(account);
+  return env ? new StaticAuth(env.value) : null;
+}
+
+/** The system won't let us read Firefox's profile: how to allow it (macOS: opens the Full Disk Access pane). */
+function sayBlocked(err: ProfileAccessError): void {
+  const [first, ...rest] = err.message.split("\n");
+  console.error("\n" + red(first) + "\n" + rest.map((l) => (/^\d\./.test(l) ? "  " + l.replace(/(Full Disk Access|Allow)/g, (m) => bold(m)) : dim(l))).join("\n"));
+  if (process.platform === "darwin") {
+    openUrl(FULL_DISK_ACCESS);
+    console.error(dim("\n(System Settings is opening on that page.)"));
+  }
+}
+
+function blockedExit(err: ProfileAccessError): never {
+  sayBlocked(err);
+  process.exit(1);
+}
+
+function requireAuth(): Authenticator {
+  const auth = makeAuth();
+  if (!auth) {
+    const blocked = findAccount()?.blocked;
+    if (blocked) blockedExit(blocked);
+    console.error(red("Not signed in to Firefox") + ` and no ${bold("ZENO_ACCESS_TOKEN")} set.`);
+    console.error(dim(`Run ${bold("zeno login")}, or set ZENO_ACCESS_TOKEN=<vpn access token>.`));
+    process.exit(1);
+  }
+  return auth;
+}
+
+/**
+ * Like requireAuth, but checks the token first, and when none works and we have a
+ * terminal, waits for one instead of exiting: signed out, for the Firefox sign-in;
+ * signed in, from the Browser Console window.
+ */
+async function ensureAuth(): Promise<Authenticator> {
+  const env = tokenEnv();
+  const errors: string[] = [];
+  if (env?.name === ENV_TOKEN) {
+    const problem = await tokenProblem(env.value);
+    if (!problem) return new StaticAuth(env.value);
+    errors.push(`${ENV_TOKEN} ${problem}.`, "Unset it so the new token below is used next time.");
+  }
+  // The account in use (accounts.ts): one added in Zeno's desktop app, or Firefox's sign-in (below), the
+  // terminal's own way in; none yet (a first start, or all signed out): Firefox's
+  const accounts = loadAccounts();
+  if (!accounts.current) {
+    if (process.stdin.isTTY && (await firstSignIn())) return ensureAuth(); // signed in with an email
+    saveAccounts(withFirefox(accounts));
+  }
+  else if (accounts.current !== FIREFOX) {
+    const auth = authFor(accounts, accounts.current)!;
+    const email = accounts.own.find((x) => x.uid === accounts.current)?.email;
+    try {
+      await auth.getAccessToken(AbortSignal.timeout(15_000));
+    } catch (err) {
+      if (err instanceof GuardianBlocked) blockedAtStart = err; // the TUI offers the relay at once
+      if ((err as FxaError).errno !== 110) return auth; // Mozilla out of reach for now: the connect says so, and tries again
+      console.log(red(`The sign-in to ${email} has ended (signed out elsewhere, or expired): sign in again in Zeno's desktop app.`));
+      console.log(dim("Using Firefox's sign-in meanwhile."));
+      saveAccounts(withFirefox(accounts));
+      return ensureAuth();
+    }
+    return auth;
+  }
+  // Signed in to Firefox: tokens come from its session and are renewed as they expire.
+  const account = findAccount();
+  let blocked: GuardianBlocked | null = null;
+  if (account?.signedIn) {
+    const auth = new FirefoxAuth(account);
+    try {
+      await auth.getAccessToken(AbortSignal.timeout(15_000)); // fail here, not on the first connect
+      return auth;
+    } catch (err) {
+      if (err instanceof GuardianBlocked) blocked = err;
+      else errors.push("Couldn't get a token from your Firefox login:", (err as Error).message);
+    }
+  }
+  // A token saved from the window below, e.g. when the Firefox account server can't be reached.
+  if (env && env.name !== ENV_TOKEN) {
+    const problem = await tokenProblem(env.value);
+    if (!problem) return new StaticAuth(env.value);
+    forgetToken();
+    errors.push(`Your saved token ${problem}.`, "Get a new one below.");
+  }
+  // Mozilla's account server is blocked here, and no relay is set: not the window below (Firefox can't reach it
+  // either), the TUI's popup, with the relay's setup a key away; once it's set, the login's tokens come through it
+  if (blocked) return (blockedAtStart = blocked), new FirefoxAuth(account!);
+  // Firefox's profile can't be read (macOS privacy protection): signing in again wouldn't help, allowing it does, or
+  // in a terminal Zeno's own sign-in (e) or another device's (d), which need nothing allowed
+  if (account?.blocked) {
+    if (!process.stdin.isTTY) blockedExit(account.blocked);
+    sayBlocked(account.blocked);
+    console.log(dim(`\nOr press ${under("e")} to sign in in a window of its own, or ${under("d")} from another device: nothing to allow · ${under("q")} quits`));
+    const keys = cancelKeys("e", "d");
+    const pressed = await keys.cancelled;
+    keys.stop();
+    if (pressed && (await (pressed === "d" ? fromDevice() : windowLogin()))) return ensureAuth();
+    process.exit(1);
+  }
+  const error = errors.join("\n");
+  if (!process.stdin.isTTY) {
+    if (error) {
+      console.error(red(error));
+      process.exit(1);
+    }
+    return requireAuth(); // non-interactive: keep the plain error
+  }
+  if (!account?.signedIn) {
+    // Signed out: the sign-in is all it takes, as the token then comes from that login.
+    if (error) console.log(red(error));
+    if (!(await cmdLogin())) process.exit(130); // cancelled: the app can't connect without a token
+    return ensureAuth(); // signed in now
+  }
+  const token = await captureToken(error);
+  if (!token) process.exit(130); // cancelled or timed out: the app can't connect without a token
+  saveToken(token);
+  return new StaticAuth(token);
+}
+
+/**
+ * Minimal JS syntax colors for the snippet. Each token sets only the foreground
+ * and returns to the block's near-white, so the code block's background stays
+ * unbroken. Strings are matched first, so words inside them aren't colored.
+ */
+function highlight(line: string): string {
+  const fg = (n: number, t: string) => `\x1b[38;5;${n}m${t}\x1b[38;5;255m`;
+  return line.replace(
+    /("(?:[^"\\]|\\.)*")|\b(async|await|const)\b|\b(ChromeUtils|console|fetch|JSON)\b|(=>|\?\?|\?\.)/g,
+    (_, str, kw, builtin, op) =>
+      str ? fg(150, str) : kw ? fg(176, kw) : builtin ? fg(81, builtin) : fg(215, op),
+  );
+}
+
+/** Resolves to null when the user presses q or Ctrl+C, or to the one of `keys` pressed; stop() releases the keyboard. */
+function cancelKeys<K extends string = never>(...keys: K[]): { cancelled: Promise<K | null>; stop: () => void } {
+  // Raw mode so q works without Enter; it also turns Ctrl+C into a 0x03 byte instead of SIGINT.
+  let done: (k: K | null) => void = () => {};
+  const cancelled = new Promise<K | null>((resolve) => (done = resolve));
+  const cancel = () => done(null);
+  const onKey = (b: Buffer) => {
+    const k = String.fromCharCode(b[0]).toLowerCase();
+    if (b[0] === 3 || k === "q") cancel(); // Ctrl+C, q, Q
+    else if (keys.includes(k as K)) done(k as K);
+  };
+  process.once("SIGINT", cancel);
+  process.stdin.on("data", onKey).setRawMode(true).resume();
+  const stop = () => {
+    process.removeListener("SIGINT", cancel);
+    process.stdin.removeListener("data", onKey).setRawMode(false).pause();
+  };
+  return { cancelled, stop };
+}
+
+/**
+ * Runs a loopback receiver and shows the steps to copy a snippet into Firefox's
+ * Browser Console, which posts the VPN token straight back. Returns the token,
+ * or null if the user cancels (Ctrl+C) or the wait times out.
+ */
+async function captureToken(error: string): Promise<string | null> {
+  // Mouse reports off, in case an earlier run was killed with them on: the user
+  // must be able to select and copy the snippet.
+  process.stdout.write("\x1b[?1000l\x1b[?1006l");
+  const rec = await startTokenReceiver();
+  const copied = await copyText(rec.snippet);
+  // only shown when signed in (signed out, ensureAuth asks for the sign-in instead)
+  const email = findAccount()?.email ?? null;
+  const status = bold(green("✓ You are signed in to Firefox"));
+  const steps = [
+    // one box line per sentence, so the window stays narrow enough for an 80-column terminal
+    status,
+    ...(email ? [email] : []),
+    "",
+    ...error.split("\n").map((l, i) => red(`${i ? " " : "✗"} ${l}`)),
+    "",
+    bold("Let's grab a new token from Firefox."),
+    "",
+    `${bold("1.")} In Firefox open ${cyan("about:config")} and set`,
+    `   ${cyan("devtools.chrome.enabled")} to ${bold("true")}. ${dim("(first time only)")}`,
+    "",
+    `${bold("2.")} Open the ${bold("Browser Console")}: ${cyan(process.platform === "darwin" ? "⌘ ⇧ J" : "Ctrl+Shift+J")}.`,
+    `   ${dim("(the Browser Console, not the page's web console)")}`,
+    "",
+    copied
+      ? `${bold("3.")} Paste it (${green("it's already in your clipboard")}) and press ${bold("Enter")}.`
+      : `${bold("3.")} Paste the snippet printed below and press ${bold("Enter")}.`,
+    "",
+    dim("The token comes back over localhost only and is saved to"),
+    dim(`${tokenFile()} (readable only by you) for next time.`),
+  ];
+  const title = cyan("🦊 zeno-vpn");
+  // centered in the box's inner width (row width minus "│ " and " │")
+  const inner = vw(box(steps, { title })[0]) - 4;
+  steps[0] = centerIn(status, inner);
+  if (email) steps[1] = centerIn(green(`(${email})`), inner);
+  const boxed = box(steps, { title });
+  // No border around the code: box characters would end up in what the user copies.
+  const lines = rec.snippet.split("\n");
+  const w = Math.max(...lines.map((l) => l.length));
+  const out = [
+    ...boxed,
+    "",
+    copied
+      ? `${bold(green("✓ Copied to your clipboard"))} ${dim("— just paste it into the Browser Console:")}`
+      : bold("Paste this into the Browser Console:"),
+    ...(!copied && process.platform === "linux" ? [dim("(with wl-clipboard or xclip installed, zeno copies it for you)")] : []),
+    "",
+    ...lines.map((l) => code(`  ${highlight(l)}${" ".repeat(w - l.length)}  `)),
+    "",
+    dim(`Waiting for the token from Firefox (up to 2 minutes) · press ${under("q")} or ${under("Ctrl+C")} to cancel`),
+  ];
+  process.stdout.write("\n" + out.join("\n") + "\n");
+
+  const keys = cancelKeys();
+  const timedOut = Symbol();
+  const token = await Promise.race([rec.token.catch(() => timedOut), keys.cancelled]);
+  keys.stop();
+  rec.close();
+  if (typeof token === "string") {
+    console.log(green("✓ token received — saved for next time."));
+    return token;
+  }
+  const why = token === timedOut ? "No token arrived within 2 minutes, so zeno closed." : "Cancelled.";
+  console.log(yellow(`${why} zeno needs a token to connect — run it again when you're ready.`));
+  return null;
+}
+
+function handleAuthError(err: unknown): never {
+  console.error(red(`\nError: ${(err as Error).message}`));
+  offlineHint();
+  process.exit(1);
+}
+
+/** Offline because a killed global session's tun still takes all traffic? Then say how to fix it. */
+function offlineHint(): void {
+  if (existsSync("/sys/class/net/zeno0")) console.error(yellow(`A killed global session's routes are still on, which keeps this computer offline: run  ${bold("zeno restore")}`));
+}
+
+async function cmdCountries() {
+  const list = await fetchServerList();
+  const free = list.filter((c) => !c.locked);
+  console.log(bold(`\n${list.length} countries (${free.length} on the free tier):\n`));
+  for (const c of list) {
+    const name = countryName(c.code, c.name);
+    const tier = c.locked ? dim("paid") : green("free");
+    const status = c.available ? "" : red(" (no servers)");
+    console.log(`  ${flag(c.code)}  ${c.code}  ${name.padEnd(22)} ${tier}${status}`);
+  }
+  console.log();
+}
+
+async function cmdUsage() {
+  const conn = new Connection(requireAuth());
+  try {
+    const usage = await conn.refreshUsage();
+    if (!usage) {
+      console.log(dim("No usage information available."));
+      return;
+    }
+    if (usage.unlimited) {
+      console.log(green("Unlimited data."));
+      return;
+    }
+    const used = usage.max - usage.remaining;
+    const pct = Number((used * 100n) / usage.max);
+    const resetStr = usage.reset ? `, resets ${shortDate(usage.reset)}` : "";
+    console.log(
+      `${bold(gb(usage.remaining))} of ${gb(usage.max)} left ` +
+        dim(`(${pct}% used${resetStr})`),
+    );
+  } catch (err) {
+    handleAuthError(err);
+  }
+}
+
+async function cmdDoctor() {
+  const account = findAccount();
+  console.log(bold("\nzeno-vpn doctor\n"));
+  console.log(`  Firefox profile : ${account?.blocked ? red(`can't be read (${account.blocked.code})`) : account ? green("found") : red("not found")}`);
+  if (account?.blocked) console.log(dim(account.blocked.message.replace(/^/gm, "    ")));
+  else if (account) {
+    console.log(`  Signed in       : ${account.signedIn ? green("yes") : red("no")}`);
+    console.log(`  Account         : ${account.email ?? dim("unknown")}`);
+  }
+  const env = tokenEnv();
+  const auth = makeAuth();
+  if (auth instanceof FirefoxAuth) {
+    console.log(`  Token source    : ${green("Firefox login")}`);
+  } else if (env) {
+    console.log(`  Token source    : ${green(env.name)}`);
+  }
+  try {
+    const list = await fetchServerList(undefined, false); // fetched now, not the one kept
+    console.log(`  Server list     : ${green(`ok (${list.length} countries)`)}`);
+  } catch (err) {
+    console.log(`  Server list     : ${red((err as Error).message)}`);
+  }
+  if (!auth) {
+    console.log(`  VPN token       : ${dim("no auth — sign in or set ZENO_ACCESS_TOKEN")}`);
+  } else {
+    const conn = new Connection(auth);
+    try {
+      const ent = await fetchEntitlement(await auth.getAccessToken());
+      console.log(`  Entitlement     : ${ent ? green("active") : yellow("none")}`);
+      const usage = await conn.refreshUsage();
+      if (usage?.unlimited) {
+        console.log(`  Data remaining  : ${green("unlimited")}`);
+      } else if (usage) {
+        console.log(`  Data remaining  : ${green(`${gb(usage.remaining)} of ${gb(usage.max)}`)}`);
+      }
+    } catch (err) {
+      console.log(`  VPN token       : ${red((err as Error).message)}`);
+    }
+  }
+  console.log();
+}
+
+/** Opens the browser's own sign-in and waits for it, or for Zeno's own (e) or another device's (d). True once signed in. */
+async function cmdLogin(): Promise<boolean> {
+  const account = findAccount();
+  if (account?.blocked) blockedExit(account.blocked);
+  if (account?.signedIn) {
+    console.log(green(`Already signed in to Firefox as ${account.email ?? "your account"}.`));
+    return true;
+  }
+  // The browser itself must be signed in (that's what its VPN uses); signing in on
+  // accounts.firefox.com only signs in the website, so open the browser's own sign-in page.
+  openBrowser("about:preferences#sync");
+  console.log(
+    "\n" +
+      box(
+        [
+          bold("Sign in inside the Firefox browser, not on a website."),
+          "",
+          `Firefox is opening its ${bold("Sync")} settings: click ${bold("Sign in")} there.`,
+          dim(`(didn't open? In Firefox: menu ${bold("☰")} → ${bold("Sign in")})`),
+          "",
+          `${bold("Sync is optional")}: zeno only needs the sign-in, so you can`,
+          `turn off everything on the ${bold("Choose what to sync")} screen.`,
+          ...(process.stdin.isTTY ? ["", `Or press ${bold(cyan("e"))} to sign in in a window of its own instead (not this Firefox),`, `or ${bold(cyan("d"))} from another device where Zeno is signed in.`] : []),
+        ],
+        { title: cyan("🦊 zeno login") },
+      ).join("\n") +
+      "\n",
+  );
+  if (!process.stdin.isTTY) {
+    console.log(dim("After signing in, re-run your command."));
+    return false;
+  }
+
+  console.log(dim(`Waiting for Firefox to sign in (up to 5 minutes) · press ${under("q")} or ${under("Ctrl+C")} to cancel`));
+  const keys = cancelKeys("e", "d");
+  let timer: NodeJS.Timeout | undefined;
+  let ticks = 0;
+  const found = new Promise<AccountState | "timeout">((resolve) => {
+    timer = setInterval(() => {
+      const a = findAccount();
+      if (a?.signedIn) resolve(a);
+      else if (++ticks >= 300) resolve("timeout");
+    }, 1000);
+  });
+  const result = await Promise.race([found, keys.cancelled]);
+  clearInterval(timer);
+  keys.stop();
+  if (result === "e") return windowLogin();
+  if (result === "d") return fromDevice();
+  if (result === null) {
+    console.log(yellow("Cancelled."));
+    return false;
+  }
+  if (result === "timeout") {
+    console.log(yellow("Firefox still isn't signed in. Signed in on a website instead? Sign in inside the browser, then run zeno login again."));
+    process.exit(1);
+  }
+  console.log(green(`✓ Firefox is signed in as ${result.email ?? "your account"}.`));
+  return true;
+}
+
+/**
+ * A first start (no account yet): how to sign in, asked as the desktop app does, before Firefox is opened or read
+ * (macOS would ask first). True once signed in with an email, or from another device; false: Firefox's sign-in it is.
+ */
+async function firstSignIn(): Promise<boolean> {
+  const ff = peekFirefox(); // Firefox's account, where reading it asks nothing
+  const firefoxWhat = ff ? "Firefox is signed in to it on this computer." : process.platform === "darwin" ? "macOS asks you to let zeno read Firefox's data." : "Firefox signs in to your account, on this computer.";
+  console.log(
+    "\n" +
+      box(
+        [
+          bold("Sign in to your Mozilla account"),
+          "",
+          "Zeno uses Firefox's free VPN, which comes with a Mozilla account.",
+          "",
+          `${bold(cyan("e"))}  Sign in in a window of its own: your Firefox stays as it is`,
+          dim(desktopApp() ? "   the desktop app's sign-in window" : "   a Firefox of its own, without Sync"),
+          `${bold(cyan("f"))}  ${ff ? `Use Firefox's account, ${ff}` : "Use Firefox's sign-in"}`,
+          dim(`   ${firefoxWhat}`),
+          `${bold(cyan("d"))}  Sign in from another device, where Zeno is signed in`,
+          dim("   a phone, computer or TV on this network: no window, no Firefox"),
+        ],
+        { title: cyan("🦊 zeno login") },
+      ).join("\n"),
+  );
+  for (;;) {
+    console.log(dim(`\npress ${under("e")}, ${under("f")} or ${under("d")} · ${under("q")} or ${under("Ctrl+C")} to cancel`));
+    const keys = cancelKeys("e", "f", "d");
+    const key = await keys.cancelled;
+    keys.stop();
+    if (key === null) {
+      console.log(yellow("Cancelled."));
+      process.exit(130); // the app can't connect without a sign-in
+    }
+    if (key === "f") return false;
+    if (await (key === "d" ? fromDevice() : windowLogin())) return true; // cancelled, or no window here: asked again
+  }
+}
+
+/**
+ * Zeno's own sign-in (fxalogin.ts), in place of Firefox's, as in the TUI's Accounts: in a window of its own (the
+ * desktop app's, or a Firefox of its own). Signed in, it's the account in use, and Firefox's sign-in (signed out, or unreadable) leaves the list:
+ * Accounts adds it back. False when cancelled, or where the window can't open (said).
+ */
+async function windowLogin(): Promise<boolean> {
+  const where = desktopApp() ? `${bold("Sign in on Mozilla's page")}, in the window that opens` : `${bold("Sign in in the Firefox window that opens")}: its ${bold("Sign in")} (no Sync)`;
+  console.log(`\n${where}  ${dim(`${under("q")} or ${under("Ctrl+C")} stops waiting`)}`);
+  const stop = new AbortController();
+  const keys = cancelKeys();
+  void keys.cancelled.then(() => stop.abort());
+  try {
+    const s = await signInWindow(stop.signal);
+    if (!s) {
+      console.log(yellow("Cancelled."));
+      return false;
+    }
+    saveAccounts(withOwn(without(loadAccounts(), FIREFOX), { uid: s.uid, email: s.email, sessionToken: s.sessionToken }));
+    console.log(green(`✓ Signed in with ${s.email}.`));
+    return true;
+  } catch (err) {
+    console.log(red((err as Error).message));
+    return false;
+  } finally {
+    keys.stop();
+  }
+}
+
+/**
+ * "Sign in from another device" (devicelogin.ts), as the TUI's Accounts has it: this computer's code and QR code
+ * here, till a phone, computer or TV where Zeno is signed in sends its sign-in, which is then the account in use.
+ * False when cancelled, or where it can't wait (said).
+ */
+async function fromDevice(): Promise<boolean> {
+  const stop = new AbortController();
+  const keys = cancelKeys();
+  void keys.cancelled.then(() => stop.abort());
+  try {
+    const email = await deviceLogin({ signal: stop.signal, say: (text) => console.log(text) });
+    if (!email) console.log(yellow("Cancelled."));
+    return !!email;
+  } catch (err) {
+    console.log(red((err as Error).message));
+    return false;
+  } finally {
+    keys.stop();
+  }
+}
+
+async function cmdProxy() {
+  const portArg = arg("port");
+  if (portArg !== undefined && !(/^\d+$/.test(portArg) && Number(portArg) >= 1 && Number(portArg) <= 65535)) {
+    console.error(red(`--port must be a number from 1 to 65535, not ${JSON.stringify(portArg ?? "")}`));
+    process.exit(1);
+  }
+  const auth = await ensureAuth();
+  const conn = new Connection(auth);
+  const code = arg("country");
+  const country = code ? await findCountry(code) : null;
+  if (code && !country) {
+    console.error(red(`Unknown country code: ${code}`));
+    process.exit(1);
+  }
+  const server = await conn.selectServer(country);
+  if (auth instanceof StaticAuth) noteTokenTtl();
+  const where = country ? `${flag(country.code)} ${countryName(country.code, country.name)}` : "recommended";
+  const settings = loadSettings();
+  useSplit(() => settings.split); // the rules set in the TUI's Split tunneling popup
+  useShield(settings);
+  const host = arg("host") ?? proxyHost(settings);
+  const port = Number(arg("port") ?? settings.port);
+  const handle = await startProxy(conn, host, port, (address) => loginFor(settings, address));
+  console.log(green(`\nProxy on ${bold(`${host}:${handle.port}`)} (SOCKS5 and HTTP)  →  ${where}`));
+  splitNote(settings.split);
+  console.log(dim(`upstream ${server.hostname}:${server.port}`));
+  if (host === "0.0.0.0") {
+    // listening on all addresses: other devices use this computer's LAN address
+    console.log(`Other devices on this network: ${bold(cyan(`${lanIp() ?? "this computer's IP"}:${handle.port}`))}`);
+    const firewall = await firewallHint(handle.port);
+    if (firewall) console.log(yellow(`A firewall is on: if other devices can't connect, run  ${firewall.join(" && ")}`));
+  }
+  const here = `${dialHost(host)}:${handle.port}`; // 0.0.0.0 is where it listens, not an address to dial
+  console.log(dim(`e.g.  export ALL_PROXY=socks5://${here}`));
+  console.log(dim(`  or  export HTTPS_PROXY=http://${here} HTTP_PROXY=http://${here}\n`));
+  // Warm the pass so auth errors surface immediately, not on first request.
+  try {
+    await conn.currentPass();
+    console.log(green("Connected. Press Ctrl+C to stop."));
+  } catch (err) {
+    await handle.close();
+    handleAuthError(err);
+  }
+  await notice();
+  const stop = async () => {
+    await handle.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+}
+
+async function cmdTui() {
+  const host = arg("host") ?? proxyHost(loadSettings());
+  const port = Number(arg("port") ?? loadSettings().port);
+  // ponytail: a Firefox login first, even for relay mode; a relay-only start (no Guardian auth) if users without one need it
+  // "logout": the last account signed out in the TUI's Accounts popup (the next start uses Firefox's sign-in again)
+  if ((await new Tui(new Connection(await ensureAuth()), host, port, blockedAtStart).run()) === "logout") console.log(green("\n✓ Signed out."));
+}
+
+async function cmdGlobal() {
+  if (WIN && !(await isPrivileged())) {
+    // Say so before the token steps, not after them.
+    console.error(red("Global mode needs Administrator rights.") + ` Open ${bold("Terminal (Admin)")} and run ${bold("zeno global")} there.`);
+    process.exit(1);
+  }
+  const conn = new Connection(await ensureAuth());
+  const code = arg("country");
+  const country = code ? await findCountry(code) : null;
+  if (code && !country) {
+    console.error(red(`Unknown country code: ${code}`));
+    process.exit(1);
+  }
+  await conn.selectServer(country);
+  await notice();
+  const settings = loadSettings();
+  useSplit(() => settings.split); // the rules set in the TUI's Split tunneling popup
+  useShield(settings);
+  splitNote(settings.split);
+  try {
+    await runGlobal(conn, {
+      host: arg("host") ?? proxyHost(settings),
+      port: Number(arg("port") ?? settings.port),
+      force: process.argv.includes("--force"),
+      login: (address) => loginFor(settings, address),
+    });
+  } catch (err) {
+    handleAuthError(err);
+  }
+}
+
+/** Shield's lists as set in zeno's Settings: used, and got now and every 6 hours (through the VPN once it's up). */
+function useShield(settings: Settings): void {
+  useBlocker(() => blockerOf(settings.blocker));
+  void refreshBlocker();
+  setInterval(() => void refreshBlocker(), 6 * 3600_000).unref();
+  // YouTube's ads, where this computer trusts zeno's certificate (checked once)
+  void caTrusted().then((ok) => useYoutube(() => !!blockerOf(settings.blocker).youtube, () => ok), () => {});
+}
+
+/** Says when split tunneling sends some sites another way, so the CLI's routing isn't a surprise. */
+function splitNote(split: Split): void {
+  const summary = splitSummary(split);
+  if (summary) console.log(yellow(`Split tunneling: ${summary} (change it with ${bold("t")} in ${bold("zeno")})`));
+}
+
+/**
+ * Puts the network back as it was before Zeno, whatever a killed or stuck one left (global mode's routes, DNS,
+ * tun2socks), and frees the proxy's port (settings: 1080 unless changed), stopping a Zeno that holds it.
+ */
+async function cmdRestore() {
+  const port = Number(arg("port") ?? loadSettings().port);
+  // the port first: a Zeno asked to quit puts its own whole-system mode back as it goes
+  const portFree = await freePort(port, (line) => console.log(line));
+  let ok: boolean;
+  if (process.platform === "win32") {
+    if (!(await isPrivileged())) {
+      console.error(red("Restoring the network needs Administrator rights.") + ` Run zeno restore in ${bold("Terminal (Admin)")}.`);
+      process.exit(1);
+    }
+    await restoreWindows(directPriv());
+    ok = true;
+  } else {
+    // What a killed global session leaves, removed in one shell so sudo asks for the password once, here;
+    // elevating itself spares `sudo zeno`, which nvm's PATH doesn't survive.
+    const script = process.platform === "darwin" ? await macRestoreScript() : staleCleanupScript(parseDefaultRoute(spawnSync("ip", ["route"]).stdout?.toString() ?? "", "zeno0"));
+    const root = process.getuid?.() === 0;
+    if (!root) console.log(dim("sudo asks for your password: restoring the network needs it."));
+    ok = spawnSync(root ? "sh" : "sudo", [...(root ? [] : ["sh"]), "-c", script], { stdio: "inherit" }).status === 0;
+  }
+  console.log(ok ? green("Network restored: Zeno's routes, DNS and tun2socks are gone.") : red("Network not restored: sudo was refused."));
+  console.log(portFree ? green(`Port ${port} is free for the proxy.`) : yellow(`Port ${port} is still taken (above).`));
+  if (!ok || !portFree) process.exit(1);
+}
+
+/** macOS: planMacRestore from the routing tables and each network service's DNS, as one shell script. */
+async function macRestoreScript(): Promise<string> {
+  const read = (cmd: string, args: string[]) => spawnSync(cmd, args).stdout?.toString() ?? "";
+  const services = read("networksetup", ["-listallnetworkservices"]).split("\n").slice(1).map((l) => l.replace(/^\*/, "").trim()).filter(Boolean);
+  const dns = Object.fromEntries(services.map((s) => [s, read("networksetup", ["-getdnsservers", s])]));
+  const plan = planMacRestore(read("netstat", ["-rn", "-f", "inet"]), read("netstat", ["-rn", "-f", "inet6"]), parseRouteGet(read("route", ["-n", "get", "default"])), dns);
+  return plan.map((argv) => `${argv.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" ")} 2>/dev/null`).join("; ") + "; true";
+}
+
+const WIN = process.platform === "win32";
+
+const HELP = `${bold("zeno-vpn")} — use Firefox's built-in VPN system-wide
+
+${bold("Usage:")} zeno [command] [options]
+
+${bold("Commands:")}
+  ${dim("(no command)")}         Launch the interactive TUI
+  countries            List available countries (free vs paid)
+  usage                Show remaining data this month
+  status | doctor      Check Firefox login, server list, entitlement, data
+  login                Sign in to the Firefox browser (its VPN needs it)
+  proxy [--country XX] [--port N] [--host H]
+                       Run a local SOCKS5 + HTTP proxy through the VPN
+  global [--country XX] [--force]
+                       Route ALL system traffic through the VPN
+                       (${WIN ? "Administrator" : "asks for your password once, for the network helper"})
+  restore [--port N]   Put the network back as before Zeno (routes, DNS, tun2socks)
+                       and free the proxy's port, stopping a Zeno that holds it
+                       (${WIN ? "Administrator" : "asks for your password"})
+  env                  Print settings that make terminal tools trust relay mode's
+                       certificate and use the proxy: ${WIN ? "zeno env | iex" : 'eval "$(zeno env)"'}
+  -v, --version        Show the version and whether an update is available
+  help                 Show this help
+
+${bold("Options:")}
+  --verbose            Also show per-connection errors (e.g. ports the VPN
+                       refuses) and tun2socks logs
+
+${dim(WIN ? "global: run  zeno global  in Terminal (Admin)  · Ctrl+C restores networking." : "global: Ctrl+C restores networking.")}
+${dim("Stop any other active VPN first (or pass --force).")}
+
+${bold("Environment:")}
+  ZENO_ACCESS_TOKEN   Use this VPN access token instead of the saved one (~/.config/zeno-vpn/token)
+`;
+
+/** After a quick command, print the yellow update notice if a newer version is out, and the hot config's notice. */
+async function notice() {
+  await checkUpdate();
+  if (updateNotice()) console.error("\n" + versionLines().join("\n"));
+  const news = hot()?.notice;
+  if (news) console.error("\n" + yellow(news));
+}
+
+async function main() {
+  // Windows: global mode's helper, started as Administrator through Windows' admin prompt (global-win32.ts's uacPriv)
+  if (process.argv[2] === HELPER_CMD) return serveElevated(process.argv[3]);
+  if (process.argv[2] === "env") {
+    // for a shell to read, at once: no update check
+    loadCa(); // the files it names must be there: a missing SSL_CERT_FILE breaks every tool that reads it
+    return void console.log(envLines(`127.0.0.1:${loadSettings().port}`).join("\n"));
+  }
+  checkUpdate(); // fire while the command runs; shown afterwards
+  useRelay(loadRelay(loadSettings())); // where vpn.mozilla.org is blocked, relay Guardian's control calls (httprelay.ts)
+  const cmd = process.argv.slice(2).find((a) => a !== "--verbose") ?? "tui"; // --verbose can go anywhere
+  if (cmd === "-v" || cmd === "--version" || cmd === "version") {
+    await checkUpdate();
+    console.log(versionLines().join("\n"));
+    return;
+  }
+  if (["tui", "up", "proxy", "global"].includes(cmd)) void refreshHot(); // the network's newest fixes (hot.ts): a quick command would wait for it
+  switch (cmd) {
+    // Long-running commands show the update notice themselves.
+    case "tui":
+    case "up":
+      await cmdTui();
+      // All closed: a dial or IP check still in flight (one the tunnel's teardown cut
+      // off waits for its timeout) must not keep the prompt from coming back.
+      process.exit(0);
+    case "proxy":
+      return cmdProxy();
+    case "global":
+      return cmdGlobal();
+    // Quick commands: run, then show the notice.
+    case "countries":
+      await cmdCountries();
+      break;
+    case "usage":
+      await cmdUsage();
+      break;
+    case "status":
+    case "doctor":
+      await cmdDoctor();
+      break;
+    case "login":
+      // Firefox's sign-in, in use from now on (accounts added in the desktop app stay listed in the TUI)
+      saveAccounts(withFirefox(loadAccounts()));
+      await cmdLogin();
+      break;
+    case "restore":
+      await cmdRestore();
+      break;
+    case "help":
+    case "--help":
+    case "-h":
+      console.log(HELP);
+      break;
+    default:
+      console.error(red(`Unknown command: ${cmd}\n`));
+      console.log(HELP);
+      process.exit(1);
+  }
+  await notice();
+}
+
+main().catch((err) => {
+  console.error(red(`Error: ${(err as Error).message}`));
+  offlineHint();
+  process.exit(1);
+});

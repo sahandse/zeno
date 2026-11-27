@@ -1,0 +1,89 @@
+{
+  "name": "zeno-desktop",
+  "productName": "Zeno",
+  "version": "1.0.0",
+  "description": "Zeno VPN's desktop app: Firefox's free VPN for your whole system (unofficial)",
+  "homepage": "https://github.com/sahandse/ZENO#readme",
+  "author": "Sahand Rezvan",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "start.js",
+  "scripts": {
+    "core": "npm --prefix .. run build && node -e \"fs.rmSync('dist', { recursive: true, force: true }); fs.cpSync('../dist', 'dist', { recursive: true })\"",
+    "start": "npm run core && electron .",
+    "dist": "npm run core && electron-builder",
+    "test": "npm run core && node updater.test.mjs && node accounts.test.mjs && node offline.test.mjs && node vpncheck.test.mjs && node relaytest.test.mjs && node autostart.test.mjs && node i18n.test.mjs",
+    "flags": "electron flag-icons.mjs"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.17.0"
+  },
+  "build": {
+    "appId": "io.github.sahandse.zeno",
+    "productName": "Zeno",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "start.js",
+      "main.js",
+      "signinwindow.js",
+      "controller.js",
+      "tray.js",
+      "badge.js",
+      "updater.js",
+      "autostart.js",
+      "preload.cjs",
+      "signin.cjs",
+      "renderer/**/*",
+      "dist/**/*",
+      "build/icon.png",
+      "build/tray/*.png",
+      "build/flags/*.png"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.utilities",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "NSCameraUsageDescription": "Zeno scans another device's QR code with the camera, to sign it in."
+      },
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "artifactName": "${productName}-${version}-setup.${ext}"
+    },
+    "appImage": {
+      "artifactName": "${productName}-${version}.${ext}"
+    },
+    "deb": {
+      "artifactName": "zeno-desktop_${version}_amd64.${ext}"
+    },
+    "linux": {
+      "target": [
+        "deb",
+        "AppImage"
+      ],
+      "category": "Network",
+      "maintainer": "Sahand Rezvan <sahandse@users.noreply.github.com>"
+    }
+  },
+  "contributors": [
+    "Dier Cohen (Foxhole upstream)"
+  ]
+}

@@ -1,0 +1,19 @@
+node_modules/
+build/
+.gradle/
+.cxx/
+.kotlin/
+local.properties
+*.iml
+.idea/
+*.keystore
+!debug.keystore
+# made by scripts/prepare.mjs
+android/app/src/main/assets/
+native/
+ios/assets/
+# iOS: CocoaPods' (pod install), Xcode's own
+ios/Pods/
+ios/Zeno.xcworkspace/
+xcuserdata/
+ios/.xcode.env.local

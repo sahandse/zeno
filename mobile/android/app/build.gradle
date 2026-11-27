@@ -1,0 +1,78 @@
+apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+react {
+    autolinkLibrariesWithApp()
+}
+
+// Zeno's version (../../package.json): a.b.c, versionCode a*10000+b*100+c
+def version = new groovy.json.JsonSlurper().parse(file("../../../package.json")).version
+def (major, minor, patch) = version.tokenize(".")*.toInteger()
+// Node for Android and the tunnel, fetched by scripts/prepare.mjs
+def nativeDir = file("../../native")
+def abis = (findProperty("reactNativeArchitectures") ?: "arm64-v8a").split(",")*.trim()
+// the release key: ZENO_KEYSTORE (a .jks file), ZENO_KEYSTORE_PASSWORD, ZENO_KEY_ALIAS; without it, the debug key
+def keystore = System.getenv("ZENO_KEYSTORE")
+
+if (gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") } && !keystore) {
+    throw new GradleException("ZENO release requires ZENO_KEYSTORE, ZENO_KEYSTORE_PASSWORD and ZENO_KEY_ALIAS")
+}
+
+android {
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk rootProject.ext.compileSdkVersion
+
+    namespace "io.github.sahandse.zeno"
+    defaultConfig {
+        applicationId "io.github.sahandse.zeno"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode major * 10000 + minor * 100 + patch
+        versionName version
+        externalNativeBuild { cmake { arguments "-DNODE_DIR=${nativeDir}/nodejs-mobile" } }
+    }
+    externalNativeBuild { cmake { path "src/main/cpp/CMakeLists.txt" } }
+    // an APK for each kind of processor (Node alone is 60 MB for each), and a universal one
+    splits {
+        abi {
+            enable true
+            reset()
+            include(*abis)
+            universalApk true // and one with all of them: the release's
+        }
+    }
+    packaging { jniLibs { useLegacyPackaging true } } // compressed in the APK
+    signingConfigs {
+        debug {
+            storeFile file("debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
+        if (keystore) {
+            release {
+                storeFile file(keystore)
+                storePassword System.getenv("ZENO_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ZENO_KEY_ALIAS")
+                keyPassword System.getenv("ZENO_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            signingConfig keystore ? signingConfigs.release : signingConfigs.debug
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    implementation("com.facebook.react:react-android")
+    implementation("com.facebook.react:hermes-android")
+    implementation(files("${nativeDir}/hev-socks5-tunnel.aar"))
+}

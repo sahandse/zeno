@@ -1,0 +1,146 @@
+// Checks the DoH-over-SOCKS forwarder: a DNS query in (UDP and TCP) comes back
+// as the DoH server's answer, carried through a fake SOCKS proxy. No real tunnel.
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"; // self-signed localhost cert
+
+import net from "node:net";
+import tls from "node:tls";
+import dgram from "node:dgram";
+import assert from "node:assert";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { startDnsForwarder, withFastlyFallback } from "../dist/dns.js";
+import { useBlocker } from "../dist/blocker.js";
+
+setTimeout(() => {
+  console.error("FAIL - timed out");
+  process.exit(1);
+}, 15000).unref();
+
+// withFastlyFallback: Mozilla's hosts on Fastly's 146.75 (dropped in Iran) get its 151.101 anycast after, and one on
+// 151.101 (vpn.mozilla.org's only one) the other three; others don't
+const fallback = withFastlyFallback((host, opts, cb) => cb(null, [{ address: host === "elsewhere.com" ? "146.75.1.5" : host === "vpn.mozilla.org" ? "151.101.1.91" : "146.75.117.91", family: 4 }]));
+const ask = (host, opts) => new Promise((r) => fallback(host, opts, (err, address, family) => r(family ? [address, family] : address)));
+assert.deepEqual((await ask("api.accounts.firefox.com", { all: true })).map((a) => a.address), ["146.75.117.91", "151.101.1.91", "151.101.65.91", "151.101.129.91", "151.101.193.91"]);
+assert.deepEqual(await ask("api.accounts.firefox.com", {}), ["146.75.117.91", 4], "one address: the answer's own");
+assert.deepEqual((await ask("vpn.mozilla.org", { all: true })).map((a) => a.address), ["151.101.1.91", "151.101.65.91", "151.101.129.91", "151.101.193.91"], "its own first, each once");
+assert.deepEqual((await ask("elsewhere.com", { all: true })).map((a) => a.address), ["146.75.1.5"], "not Mozilla's: as it was");
+
+const listen = (srv) => new Promise((r) => srv.listen(0, "127.0.0.1", () => r(srv.address().port)));
+const ANSWER = Buffer.from([0xab, 0xcd, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0]); // arbitrary DNS-ish bytes
+
+const dir = mkdtempSync(path.join(os.tmpdir(), "zeno-vpn-dns-"));
+const key = path.join(dir, "k.pem");
+const cert = path.join(dir, "c.pem");
+execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=cloudflare-dns.com"], { stdio: "ignore" });
+
+// Fake DoH server: for each POST (keep-alive), reply 200 with ANSWER.
+let dohRequests = 0;
+const doh = tls.createServer({ key: readFileSync(key), cert: readFileSync(cert) }, (s) => {
+  let buf = Buffer.alloc(0);
+  s.on("data", (d) => {
+    buf = Buffer.concat([buf, d]);
+    for (;;) {
+      const i = buf.indexOf("\r\n\r\n");
+      if (i < 0) return;
+      const len = Number(buf.toString("latin1", 0, i).match(/content-length:\s*(\d+)/i)[1]);
+      if (buf.length < i + 4 + len) return;
+      buf = buf.subarray(i + 4 + len);
+      dohRequests++;
+      s.write(
+        `HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: ${ANSWER.length}\r\nConnection: keep-alive\r\n\r\n`,
+      );
+      s.write(ANSWER);
+    }
+  });
+});
+const dohPort = await listen(doh);
+
+// Fake SOCKS5 proxy: no-auth, CONNECT (any addr) -> the fake DoH server.
+const socks = net.createServer((c) => {
+  let stage = 0;
+  const onData = (d) => {
+    if (stage === 0) {
+      c.write(Buffer.from([0x05, 0x00]));
+      stage = 1;
+    } else {
+      assert.equal(d[3], 0x03, "forwarder used a DOMAIN address (server-side resolve)");
+      c.removeListener("data", onData); // hand the socket to the pipe
+      c.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+      const up = net.connect(dohPort, "127.0.0.1", () => {
+        c.pipe(up);
+        up.pipe(c);
+      });
+      up.on("error", () => c.destroy());
+    }
+  };
+  c.on("data", onData);
+  c.on("error", () => c.destroy());
+});
+const socksPort = await listen(socks);
+
+// port 0: the forwarder picks a port free for both UDP and TCP, and says which.
+const f = await startDnsForwarder({ socksHost: "127.0.0.1", socksPort, dohHost: "cloudflare-dns.com", host: "127.0.0.1", port: 0 });
+const PORT = f.port;
+assert.ok(PORT > 0, "picked port reported");
+
+// UDP query -> answer.
+const QUERY = Buffer.from([0xab, 0xcd, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+const udpAns = await new Promise((resolve, reject) => {
+  const c = dgram.createSocket("udp4");
+  c.on("message", (m) => {
+    c.close();
+    resolve(m);
+  });
+  c.on("error", reject);
+  c.send(QUERY, PORT, "127.0.0.1");
+});
+assert.deepEqual(udpAns, ANSWER, "UDP query returns the DoH answer");
+
+// TCP query (2-byte length prefix) -> length-prefixed answer.
+const framed = (q) => Buffer.concat([Buffer.from([q.length >> 8, q.length & 0xff]), q]);
+const tcpAns = await new Promise((resolve, reject) => {
+  const c = net.connect(PORT, "127.0.0.1", () => c.write(framed(QUERY)));
+  let buf = Buffer.alloc(0);
+  c.on("data", (d) => {
+    buf = Buffer.concat([buf, d]);
+    if (buf.length >= 2 && buf.length >= 2 + buf.readUInt16BE(0)) {
+      c.destroy();
+      resolve(buf.subarray(2, 2 + buf.readUInt16BE(0)));
+    }
+  });
+  c.on("error", reject);
+});
+assert.deepEqual(tcpAns, ANSWER, "TCP query returns the DoH answer");
+assert.ok(dohRequests >= 2, "DoH server was reached for both queries");
+
+// Shield: a blocked name gets NXDOMAIN at once, the DoH server not asked
+useBlocker(() => ({ lists: [], rules: [{ match: "ads.example", via: "block" }] }));
+const asked = dohRequests;
+const blockedQ = Buffer.concat([Buffer.from([0x0b, 0x0c, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]), Buffer.from([1, 0x78, 3, 0x61, 0x64, 0x73, 7, ...Buffer.from("example"), 0, 0, 1, 0, 1])]);
+const nx = await new Promise((resolve, reject) => {
+  const c = dgram.createSocket("udp4");
+  c.on("message", (m) => (c.close(), resolve(m)));
+  c.on("error", reject);
+  c.send(blockedQ, PORT, "127.0.0.1");
+});
+assert.equal(nx.readUInt16BE(0), 0x0b0c, "its id");
+assert.equal(nx.readUInt16BE(2) & 0xf, 3, "NXDOMAIN");
+assert.equal(dohRequests, asked, "DoH not asked");
+useBlocker(() => ({ lists: [] }));
+
+// A TCP client that stays connected once answered, as systemd-resolved does: close() hangs it up instead of waiting
+// for it (in global mode its own close can't come, once the tun and the address both ends are on are gone).
+const held = net.connect(PORT, "127.0.0.1", () => held.write(framed(QUERY)));
+held.on("error", () => {});
+await new Promise((r) => held.once("data", r));
+const hungUp = new Promise((r) => held.once("close", r));
+const closed = await Promise.race([f.close().then(() => true), new Promise((r) => setTimeout(() => r(false), 2000))]);
+assert.ok(closed, "close() doesn't wait for a TCP client that stays connected");
+await hungUp;
+
+socks.close();
+doh.close();
+console.log("ok - DoH-over-SOCKS forwarder resolves UDP and TCP queries through the tunnel, and closes with a client still connected");
+process.exit(0);
